@@ -1,0 +1,12 @@
+{
+  "layout:board-herdr": {
+    "cmd-e": "board-herdr.toggle",
+    "cmd-n": "board-herdr.new-agent",
+    "cmd-w": "board-herdr.close",
+    "cmd-shift-a": "board-herdr.asks",
+    "cmd-shift-b": "board-herdr.open-board"
+  },
+  "global": {
+    "cmd-shift-b": "layout.switch:board-herdr"
+  }
+}
