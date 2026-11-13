@@ -34,6 +34,10 @@
 // `claude -p` Haiku) into a record in shared("asks.state"). A card shows its worktree's question with the options to
 // click (Y takes the recommended one); "asks" is the panel at the board's right with every question in scope, to answer
 // or type a reply (⌘⇧A, R, the sidebar's Asks row). Answers go in with hc and are logged where asks.json's `log` says.
+// PRs (⌘⇧G, the sidebar's PRs row; the main stack's "prs" child, prs.js): the open pull requests of the org in prs.json
+// that wait on you, as two lanes, other people's (asking you, your team's repos, reviewed by you) and yours, each in the
+// column of where it stands (prs-rules.js). The sidebar's copy reads them with `gh api graphql` (prs-data.js), read only;
+// the gear ("prs-settings") edits prs.json's org and team repos. ⌁ on a card opens the worktree on the PR's branch.
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
 import { spaces, agents, panes, run, props, exec, shared, setShared, window, nextCommand, layout, openOverlay, closeOverlay,
@@ -41,6 +45,9 @@ import { spaces, agents, panes, run, props, exec, shared, setShared, window, nex
 import { Engine } from "./asks-engine.js";
 import { loadConfig } from "./asks-state.js";
 import { AsksPanel, Answerer, pickable, waitingAsks, questionsOf } from "./asks.js";
+import { PrsFeed, PRS, PR_ASK, PR_DRAFTS } from "./prs-data.js";
+import { PrsBoard, PrsSettings, PRS_SHOWN } from "./prs.js";
+import { lanes } from "./prs-rules.js";
 
 const MOD = "board-herdr";
 const C = {
@@ -107,6 +114,7 @@ const PENDING = "boardh.pending"; // shared: {stage, folder, at}: New agent's st
 const SPACE_STAGES = "boardh.spaceStages"; // shared: space id -> its stage
 const STAGE_AT = "boardh.stageAt"; // shared: space id -> when it last changed stage (ms): Done's 3 days count from it
 const SPACE_TITLES = "boardh.spaceTitles"; // shared: space id -> the title New agent gave its worktree
+const BRANCHES = "boardh.branches"; // shared: [{space, project, branch}]: each worktree's branch, for the PRs view's ⌁
 
 // one call per folder: the repo, its branch, how far it is from the default branch, and what's uncommitted
 const GIT = `cd "$1" 2>/dev/null || exit 3
@@ -264,9 +272,9 @@ const parseTrees = (stdout) => String(stdout ?? "").split(/\n\n+/).map((block) =
 
 // ⌘W: closes the tab, as Herdr does, but a worktree's last tab opens Herdr's own Remove worktree instead (it warns
 // about uncommitted changes, closes the space and runs git worktree remove; the branch and its commits stay). On the
-// board it does nothing: the tab it would close isn't the one you see.
+// board or the PRs view it does nothing: the tab it would close isn't the one you see.
 function closeTab() {
-  if (shownView() === "board") return;
+  if (shownView() !== "work") return;
   const s = spaces().find((x) => x.id === focused()?.space) ?? activeSpace();
   if (s && s.tabs.length <= 1 && isWorktree(s)) deleteWorktree(s.id);
   else run("tab.close", {});
@@ -367,6 +375,20 @@ function openBoard(kind) {
   setShared(COL, { kind, at: Date.now() });
 }
 
+// shows the PRs view (the main stack's "prs" child), reads GitHub again and gives it the keyboard
+function openPrs() {
+  run("layout.select", { stack: "main", child: "prs" });
+  setShared(VIEW, "prs");
+  setShared(PR_ASK, Date.now());
+  setShared(PRS_SHOWN, Date.now());
+}
+const openPrsSettings = () => openOverlay({ mod: MOD, kind: "dialog", width: 620, height: 520, props: { part: "prs-settings" } });
+// the worktree here on a PR's branch: its repo and branch first, else the only worktree on that branch
+function worktreeOn(repo, branch) {
+  const list = (shared(BRANCHES) ?? []).filter((b) => b.branch === branch);
+  return (list.find((b) => b.project === repo) ?? (list.length === 1 ? list[0] : null))?.space ?? null;
+}
+
 // how to start an agent on a first message: Herdr's task puts it last on the command line, as Claude Code takes it;
 // OpenCode's first argument is a folder, so it gets --prompt
 const launch = (a, task) => (!task ? { argv: a.run } : a.key === "opencode" ? { argv: [...a.run, "--prompt", task] } : { argv: a.run, task });
@@ -451,6 +473,13 @@ export default class Board extends View {
     if (this.part === "new") { this.initNew(cx); return; }
     if (this.part === "stage") { this.initStage(cx); return; }
     if (this.part === "cleanup") { this.initCleanup(cx); return; }
+    if (this.part === "prs-settings") { this.prsSet = new PrsSettings(); this.prsSet.init(cx); return; }
+    if (this.part === "prs") {
+      this.prsUi = new PrsBoard({ agentFor: worktreeOn, settings: openPrsSettings, refocused: () => shared(REFOCUS) ?? 0,
+        openSpace: (id) => { const w = worktrees().find((x) => x.key === id); if (w) goToWorktree(w); } });
+      this.prsUi.init(cx);
+      return;
+    }
     if (this.part === "asks") {
       this.asksUi = new AsksPanel({
         inScope: (id) => (id ? inScope(id) : allSpaces()), scopeName, all: allSpaces,
@@ -470,6 +499,9 @@ export default class Board extends View {
         config(cx);
         cx.timer.every(30000, config);
         cx.timer.every(1000, (cx) => this.engine.tick(cx));
+        // the PRs view's data: read here, where it is always drawn, so the sidebar can count it
+        this.prsFeed = new PrsFeed();
+        cx.timer.every(1000, (cx) => this.prsFeed.tick(cx));
       }
       if (this.part === "nav") cx.spawn(async (cx) => {
         for (;;) {
@@ -479,6 +511,8 @@ export default class Board extends View {
           else if (c === "new-agent") newAgent();
           else if (c === "close") closeTab();
           else if (c === "asks") toggleAsks(); // ⌘⇧A
+          else if (c === "prs") { if (shownView() === "prs") openBoard(null); else openPrs(); } // ⌘⇧G
+          else if (c === "prs-settings") openPrsSettings(); // the PRs view's gear
           else if (c === "asks-open") { openBoard(null); toggleAsks(true); } // a question's toast
           else if (c === "asks-recheck") this.engine.recheck(); // read every agent's last turn again
           else if (c.startsWith("go-")) goToAgent(c.slice(3)); // board-herdr.go-t7: what a click on an agent does
@@ -642,6 +676,8 @@ export default class Board extends View {
     if (JSON.stringify(counts) !== JSON.stringify(shared(COUNTS) ?? {})) setShared(COUNTS, counts);
     const repos = Object.fromEntries(cards.filter((t) => t.git).map((t) => [t.key, { common: t.git.common, name: t.git.project }]));
     if (JSON.stringify(repos) !== JSON.stringify(shared(REPOS) ?? {})) setShared(REPOS, repos);
+    const branches = cards.filter((t) => t.git?.branch).map((t) => ({ space: t.key, project: t.git.project, branch: t.git.branch }));
+    if (JSON.stringify(branches) !== JSON.stringify(shared(BRANCHES) ?? [])) setShared(BRANCHES, branches);
   }
 
   readAsks(cx) {
@@ -1003,6 +1039,12 @@ export default class Board extends View {
     if (this.part === "bottom") return this.bottom();
     if (this.part === "nav") return this.nav();
     if (this.part === "asks") return this.asksUi.render(cx);
+    if (this.part === "prs") {
+      // drawing means the stack shows it: tell the top bar, as board() does
+      if (shared(VIEW) === "work" && Date.now() - (shared(LEFT) ?? 0) > 1500) setShared(VIEW, "prs");
+      return this.prsUi.render(cx);
+    }
+    if (this.part === "prs-settings") return this.prsSet.render(cx);
     if (this.part === "new") return this.newDialog();
     if (this.part === "stage") return this.stagePicker();
     if (this.part === "cleanup") return this.cleanupDialog();
@@ -1131,7 +1173,7 @@ export default class Board extends View {
       const addr = blocked?.a.address ?? q.address;
       actions = h_flex().flex_wrap().gap(6)
         .when(!!blocked, (el) => el.child(this.btn(`answer-${t.key}`, "Answer", "you", (cx) => this.setFocus(cx, true, t))))
-        .when(!!q, (el) => el.child(this.btn(`asks-${t.key}`, pickable(q) ? "Asks  R" : "Reply  R", blocked ? "plain" : "you", () => toggleAsks(true))))
+        .when(!!q, (el) => el.child(this.btn(`asks-${t.key}`, pickable(q) || q.form ? "Asks  R" : "Reply  R", blocked ? "plain" : "you", () => toggleAsks(true))))
         .child(this.btn(`go-${t.key}`, "Go to agent", "plain", (cx) => this.goTo(cx, t, addr)))
         .child(this.btn(`add-${t.key}`, "+ Agent", "plain", () => newAgent(t.key)));
     } else {
@@ -1203,7 +1245,9 @@ export default class Board extends View {
           .child(mono(10, C.muted, String(o.n)))
           .child(div().flex_1().min_w(0).truncate().font_family(SANS).text_size(12).text_color(C.text).tooltip(o.label).child(o.label.replace(/\s*\(recommended\)\s*$/i, "")))
           .when(rec(i), (el) => el.child(mono(10, C.accent, sel ? "recommended · Y" : "recommended")))))))
-      .when(many > 1, (el) => el.child(mono(10, C.dim, `${many} questions: answer them in Asks (R)`)))
+      .when(!q.form && many > 1, (el) => el.child(mono(10, C.dim, `${many} questions: answer them in Asks (R)`)))
+      .when(Boolean(q.form) && !sending, (el) => el.child(mono(10, C.dim, q.form.length > 1
+        ? `${q.form.length} questions in one form: answer them in Asks (R)` : "takes several answers: pick them in Asks (R)")))
       .when(failed, (el) => el.child(h_flex().w_full().gap(6).items_center()
         .child(div().flex_1().min_w(0).child(mono(10, C.red, q.error ?? "it didn't go in")))
         .child(this.btn(`retry-${t.key}`, "Retry", "plain", (cx) => this.answerer.retry(q, cx)))));
@@ -1363,7 +1407,7 @@ export default class Board extends View {
     const sideOpen = Boolean(side && !side.hidden);
     const stay = Date.now() - (shared(STAY) ?? 0) < 3000;
     // filtered to the shown repo, the board stays: it now shows that repo's worktrees
-    if (space && this.lastSpace && space.id !== this.lastSpace && !focus && view === "board" && !sideOpen && !stay && !shared(PEEK) && allSpaces()) {
+    if (space && this.lastSpace && space.id !== this.lastSpace && !focus && (view === "board" || view === "prs") && !sideOpen && !stay && !shared(PEEK) && allSpaces()) {
       run("layout.select", { stack: "main", child: "work" });
       setShared(LEFT, Date.now());
       setShared(VIEW, "work");
@@ -1533,12 +1577,25 @@ export default class Board extends View {
         .child(div().flex_none().min_w(24).px(6).rounded(10).flex().justify_center().bg(nAsks ? C.you : "#00000000")
           .font_family(MONO).text_size(12).text_color(nAsks ? "#1a1300" : C.dim).child(String(nAsks))))
       .when(narrow, (el) => el.child(mono(12, nAsks ? C.you : C.dim, String(nAsks))));
+    // PRs: what waits on you on GitHub (to review, comments on yours, drafts to release), a click shows the view
+    const prsOn = view === "prs";
+    const nPrs = lanes(shared(PRS)?.prs ?? [], shared(PR_DRAFTS) ?? {}, Date.now()).count;
+    const prsRow = h_flex().id("nav-prs").h(34).flex_none().rounded(7).items_center().cursor_pointer()
+      .when(narrow, (el) => el.w(40).justify_center().gap(4)).when(!narrow, (el) => el.w_full().px(10).gap(10))
+      .bg(prsOn ? "#2c2838" : "#00000000").hover((st) => st.bg(prsOn ? "#2c2838" : C.hover))
+      .on_click(() => (prsOn ? openBoard(null) : openPrs()))
+      .child(div().w(16).flex_none().flex().justify_center().child(icon("prs", 15, nPrs ? C.you : C.accent)))
+      .when(!narrow, (el) => el.child(div().flex_1().font_family(SANS).text_size(14).text_color(C.text).child("PRs"))
+        .child(mono(10, C.dim, "⌘⇧G"))
+        .child(div().flex_none().min_w(24).px(6).rounded(10).flex().justify_center().bg(nPrs ? C.you : "#00000000")
+          .font_family(MONO).text_size(12).text_color(nPrs ? "#1a1300" : C.dim).child(String(nPrs))))
+      .when(narrow, (el) => el.child(mono(12, nPrs ? C.you : C.dim, String(nPrs))));
 
     // the rail: each stage's dot and count, opening the board there
     if (narrow) {
       return v_flex().id("nav").size_full().bg(C.top).pt(10).pb(8).gap(3).items_center()
         .on_size_change((size, cx) => { this.size = size; cx.notify(); })
-        .child(newBtn).child(boardRow).child(asksRow).children(needsRow ? [needsRow] : [])
+        .child(newBtn).child(boardRow).child(asksRow).child(prsRow).children(needsRow ? [needsRow] : [])
         .children(live.map(([k, , color]) => h_flex().id(`nav-${k}`).w(40).h(30).flex_none().rounded(7).gap(4).items_center().justify_center()
           .bg(view === "board" && col === k ? "#2c2838" : "#00000000").cursor_pointer().hover((st) => st.bg(C.hover))
           .on_click(() => openBoard(view === "board" && col === k ? null : k))
@@ -1573,7 +1630,7 @@ export default class Board extends View {
 
     return v_flex().id("nav").size_full().bg(C.top).px(8).pt(10).pb(8).gap(3)
       .on_size_change((size, cx) => { this.size = size; cx.notify(); })
-      .child(newBtn).child(boardRow).child(asksRow)
+      .child(newBtn).child(boardRow).child(asksRow).child(prsRow)
       .child(div().pt(4).child(scopeSwitch("nav-scope", true)))
       .children(needsRow ? [div().pt(4).child(needsRow)] : [])
       .child(v_flex().id("nav-groups").w_full().flex_1().min_h(0).mt(4).gap(4).overflow_y_scrollbar()
@@ -1583,7 +1640,7 @@ export default class Board extends View {
 
   // the stage picker and New agent, closing (Esc, a pick, a click beside): the board takes the keyboard back
   async close() {
-    if (this.part === "stage" || this.part === "new" || this.part === "cleanup") setShared(REFOCUS, Date.now());
+    if (this.part === "stage" || this.part === "new" || this.part === "cleanup" || this.part === "prs-settings") setShared(REFOCUS, Date.now());
   }
 
   // ---- leftover worktrees -----------------------------------------------------------------------------------

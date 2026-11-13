@@ -6,7 +6,8 @@ sub-agents they started, counted by status, its branch, commits, uncommitted lin
 an agent is waiting on, with its options to click. A sidebar lists the worktrees by stage, most recently used first,
 with a link to each agent. New agent (⌘N) makes a worktree of the shown repo and starts Claude Code or OpenCode in it
 on your message plus a Context block (a Linear issue, a PR, a Slack message, any link). Done removes the worktree after
-3 days; ⌘W on a worktree's last tab removes it at once. The whole board works from the keyboard.
+3 days; ⌘W on a worktree's last tab removes it at once. A PRs view (⌘⇧G) lays out the open pull requests that wait on
+you, other people's and yours, as a kanban of where each one stands. The whole board works from the keyboard.
 
 ![Board (Herdr)](preview.png)
 
@@ -70,7 +71,8 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
 - **Asks panel** (hidden; 380 px, min 300, max 720) at the board's right: header with the icon, `Asks`, the scope
   (`workspace` or `All worktrees`), an `All` toggle and ×; a line `1 waiting · 3 answered today · ⌘⇧A hides`; one card
   per waiting question (agent, worktree, age, kind chip, context line, the question, each option with its description
-  and `recommends`, a multi-question list that unfolds each question's choices, `Other answer` / `Answer` with a text
+  and `recommends`, a multi-question list that unfolds each question's choices, Claude Code's question forms (below),
+  `Other answer` / `Answer` with a text
   field, `Open terminal`, `Dismiss`); a foldable `Answered N` list.
 - **Focus terminal** (hidden; weight 0.5, min 360, max 1000) and **side** (hidden, 640 px): an agent's live terminal
   beside the board.
@@ -90,6 +92,27 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
     at risk (`2 uncommitted changes: lost on remove` / `no uncommitted changes` / `folder already gone`, `3 commits on
     no remote (kept on the branch)`), `Open`, `Remove` (`Remove…` then a red `Remove anyway` when it has changes); a footer
     `Remove the N without changes` and `Done`.
+- **PRs** (the `main` stack's third child, ⌘⇧G or the sidebar's `PRs` row under Asks, with the pull request icon, `⌘⇧G`
+  and an amber count pill like Asks'): a header (`PRs` 15 px semibold, `read HH:MM` or `reading…` in mono `#56555b`,
+  any gh problem in red, then `hjkl move · ⏎ open · a agent · d draft`, `↻ Refresh  R` and `⚙ Repos  ,`), then two
+  lanes sharing the height, each a title (`PRs de outros · N`, `Meus PRs · N`) over five columns:
+  - PRs de outros: `Draft` `#56555b` · `Precisa da minha revisão` `#ffb406` · `Precisa do meu time` `#8f7fd1` ·
+    `Revisado, esperando o autor` `#6fb3f2` · `Pronto para merge` `#53cf91`.
+  - Meus PRs: `Draft: revisar para liberar` `#b4a0db` · `Draft: ideias` `#56555b` · `Comentários a resolver` `#e0707f` ·
+    `Esperando review` `#6fb3f2` · `Pronto para merge` `#53cf91`.
+  - Columns are `#141416` boxes (8 px radius, `#1e1e20` border) with the dot, the label in mono capitals and a count;
+    a column with PRs is as wide as the row allows (220 px at least, then the lane scrolls sideways), one without is
+    150 px. Each column's list scrolls.
+  - A card (`#1a1a1d`, `#2a2a30` border, 6 px radius; selected: `#1c1926` with a `#625187` border): the title (12.5 px,
+    two lines at most), then in mono 10.5 px: on others' PRs the author's initials on a 15 px colored circle and their
+    login, on yours `→ ` and the reviewers asked; `repo#number`; checks `✓` `#53cf91`, `✗` `#e0707f` or `●` `#8f7fd1`;
+    `💬 n` unresolved threads; the age since the last update; on others' `Pronto para merge` an amber chip with what
+    blocks the merge (`conflito`, `CI falhando`, `CI rodando`); `⌁` when a worktree here is on the PR's branch; `↗`.
+  - No org set: `Set your GitHub org and team repos` and `⚙ Set up`. A read that found nothing: `No open pull requests
+    for you in <org>` and a hint to check the name and `gh auth status`.
+  - **The gear** (620×520 dialog): `PRs: org and team repos`, a line on what they do, `Org` input, one row per team repo
+    (name in mono, a `Whole repo` | `CODEOWNERS team` switch, the team's slug input for the latter, `×`), an `Add a
+    repo: its name, ⏎` input, the error in red, `Cancel` and `Save`.
 
 ## How it behaves
 
@@ -137,6 +160,18 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   - A blocked agent becomes a record within about a second. Claude Code's own report says it: `kind: question` gives a
     DECISION with its options and recommendation, `kind: permission` an APPROVAL whose Yes / Yes, and… / No come from
     the screen.
+  - Claude Code's question dialog can hold several questions (one tab each) and ones that take several answers, but
+    its report names only the first. The session transcript
+    (`~/.claude/projects/<cwd with every non-alphanumeric as ->/*.jsonl`) has the whole `AskUserQuestion` call: its
+    questions, headers, options with descriptions, `multiSelect`. Several questions, or one with several answers,
+    make a form in the panel: a box per option where several fit, a dot where one does (the recommended one
+    pre-picked), and `Other answer…` per question. `Send answers` appears once each question has one. The board's
+    card points to the panel.
+  - The form is filled one tab at a time, reading the screen after each key. A number picks and moves on under a
+    one-answer question. Under a several-answer question, a number turns its box on or off, and → moves on. A typed
+    answer: move to the `Type something` row, `hc send --force` the text (typing ticks it, the paste's Enter flips
+    it back, so press Enter if it ended off), then Tab to the Next row and Enter. A half-done dialog is first taken
+    back to its first tab with ←. Last comes the review step: press `Submit answers`.
   - Other agents' numbered options are read off the screen, with `claude -p` (Haiku) as a fallback whose options must
     all appear on screen. Otherwise the record is UNCLEAR.
   - A turn that ends asking in plain text (a `?` in the agent's last message) goes to Haiku once. If it is really
@@ -162,6 +197,29 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
 - Clicking a space in the sidebar's Spaces shows its terminal (in All scope); a click on an agent or worktree row goes
   to its agent (agent.focus, pane.focus, the `work` child). The sidebar's agent order is what ⌘] / ⌘[ follow.
   Right-click any worktree or agent row: the stage picker at the pointer.
+- **PRs: which come in.** Only open PRs of the org in `~/.config/herdr-app/prs.json` (`{"org": "acme", "team_repos":
+  [{"repo": "web"}, {"repo": "monorepo", "codeowners": "payments"}]}`): yours (always), ones asking your review,
+  ones you reviewed (only where your review was once asked, or in a team repo), and every PR of a team repo, nobody
+  asking you; a `codeowners` entry takes only the PRs that change a file the repo's CODEOWNERS gives to
+  `@<org>/<team>` (the last matching line wins, as on GitHub). Other people's PRs with no update in 30 days leave.
+- **PRs: the column**, the first rule that holds:
+  - Others': draft; approved (review decision APPROVED, or one approval where none is required), even with a conflict
+    or failing checks (the author's to fix: the chip says it); your review asked and not given since, or the author
+    pushed commits of their own (not merges of the base, not a bot's) after your last review; you reviewed; a team
+    repo's. Any other is dropped.
+  - Yours: a draft goes to `Draft: revisar para liberar` until `d` moves it to `Draft: ideias` (and back; kept per PR,
+    dropped when it leaves draft or closes); changes requested, unresolved threads, failing checks or a conflict:
+    `Comentários a resolver`; approved: `Pronto para merge` (checks still running stay here, `●`); else `Esperando
+    review`.
+  - Newest update first in each column. The sidebar count is Precisa da minha revisão + Comentários a resolver +
+    Draft: revisar para liberar.
+- **PRs: keys** (the view takes the keyboard when opened): ↑↓ / jk within a column, past its end into the other lane;
+  ←→ / hl across columns with PRs; ⏎ or O open the PR in the browser (a double-click too, or `↗`); A the agent of the
+  worktree on its branch (`⌁`); D a draft of yours between the two draft columns; R reads GitHub now; `,` the gear;
+  Esc clears the selection. ⌘⇧G again goes back to the board.
+- **PRs: reading.** On opening the view, every 3 min, on R and after the gear's Save; a hand edit of `prs.json` is
+  noticed within 30 s and shows after the read in flight and one more (up to about 2 min). While reading, the last
+  PRs stay; a gh failure keeps them and shows `gh: <why>` in red. Nothing is ever written to GitHub.
 - The board reads git in each space's folder every 10 s and whenever an agent's status or a space's folder changes; gh
   for each branch's PR every 60 s; your merged PRs of the week every 5 min; the screen question of blocked agents every
   5 s.
@@ -174,7 +232,8 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   - `body`: row, divider 1 `#1e1e20`. Its children:
     - `sidebar`: column, 220 px, min 44, max 480, background `chrome`, with `nav` (weight 3, part `nav`) over `spaces`
       (weight 1, the shipped `spaces` mod).
-    - `main`: stack, active `board`, with `board` (part `board`) and `work` (`{tab: active}` with the pane frame above).
+    - `main`: stack, active `board`, with `board` (part `board`), `work` (`{tab: active}` with the pane frame above)
+      and `prs` (part `prs`).
     - `asks`: hidden, 380 px, min 300, max 720, part `asks`.
     - `focus-term`: hidden, weight 0.5, min 360, max 1000, `{agent: focused}`.
     - `side`: hidden, 640 px, `{tab: active}`.
@@ -184,11 +243,15 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
     `stage` and `cleanup`, which it opens itself with `openOverlay({mod: "board-herdr", props: {part, …}})`.
   - `asks.js`: `Answerer` delivers an answer (used by the board's cards); `AsksPanel` is the `asks` part.
   - `asks-engine.js`: the Asks detection; `asks-state.js`: the record and `asks.json`.
+  - `prs-rules.js`: the PRs view's rules, pure (no `herdr` import), tested by `node --test test/*.test.mjs` from the
+    mod's folder: the searches, the GraphQL query, normalizing, CODEOWNERS, the columns and the count.
+  - `prs-data.js`: `prs.json` and `PrsFeed`, which the `nav` copy ticks each second; `prs.js`: `PrsBoard` (part `prs`)
+    and `PrsSettings` (the overlay `prs-settings`).
   - Art: `columns.svg`, `spinner.svg`, `asks.svg`, `ask-check|x|send|terminal.svg`; it also uses the shipped
-    `mods/workspace-chrome/spinner.svg` and `chevron-*.svg`.
+    `mods/workspace-chrome/spinner.svg` and `chevron-*.svg`; `prs.svg` for the PRs row.
 - Copies: the `board` copy owns the keyboard (`cx.focus_handle()`, `on_key_down`), git, gh, Done and the cards; the
   `nav` copy runs the Asks engine and takes `board-herdr.*` key commands (`open-board`, `open-<stage>`, `new-agent`,
-  `close`, `toggle`, `go-<address>`, `asks`, `asks-open`, `asks-recheck`); the board copy takes `focus`, `unfocus`,
+  `close`, `toggle`, `go-<address>`, `asks`, `asks-open`, `asks-recheck`, `prs`, `prs-settings`); the board copy takes `focus`, `unfocus`,
   `toggle`, `next/prev/left/right`, `peek`, `go`, `archive`, `delete`, `stage`, `add-agent`, `scope`, `stage-next`,
   `stage-prev`, `merge`, `yes`, `no`; the `asks` copy takes `asks-accept`.
 - Shared state (`shared`/`setShared`):
@@ -197,6 +260,8 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   - New agent: `boardh.agent`, `boardh.newStage`, `boardh.pending`.
   - Worktrees: `boardh.spaceStages`, `boardh.stageAt`, `boardh.spaceTitles`.
   - Asks: `asks.state`.
+  - PRs: `boardh.prs` (`{at, me, org, prs, problem, reading}`), `boardh.prAsk`, `boardh.prDrafts`, `boardh.prsShown`,
+    `boardh.branches` (each worktree's branch, written by the board copy, for `⌁`).
 - `herdr` functions:
   - Data: `spaces`, `agents`, `terminals`, `panes`, `focused`, `layout`, `shared`/`setShared`, `props`, `window`,
     `home`, `knownAgents`.
@@ -211,12 +276,18 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
     `worktree list --porcelain|add|remove|prune`, `show-ref`.
   - gh: `pr view --json number,url,state,isDraft,mergeStateStatus,statusCheckRollup`, `pr merge --squash|--merge|--rebase`
     (whichever the repo allows), `pr create --fill` after `git push -u origin HEAD`, `search prs --author=@me --merged-at`.
+  - gh for PRs: `api graphql` searches (`is:pr is:open archived:false` with `org:<org> author:@me`,
+    `user-review-requested:@me`, `reviewed-by:@me`, and `repo:<org>/<repo>` per team repo; the last three with
+    `-author:@me updated:>=<30 days ago>`), 50 a page (20 for team repos), 8 pages at most; and
+    `api -H "Accept: application/vnd.github.raw" repos/<org>/<repo>/contents/.github/CODEOWNERS` (then `CODEOWNERS`,
+    `docs/CODEOWNERS`), kept an hour.
   - hc: `read`, `get`, `keys`, `send`.
   - `claude -p --model haiku --output-format json --json-schema …` (Asks).
   - `sh -c` to read `LINEAR_API_KEY` from your login shell, and `fetch` to `api.linear.app/graphql`.
 - Shipped mods it opens: `worktree` (`{space, action: "remove"}`, 440×260) for every delete.
 - `keys.json`: `"layout:board-herdr": {"cmd-e": "board-herdr.toggle", "cmd-n": "board-herdr.new-agent", "cmd-w":
-  "board-herdr.close", "cmd-shift-a": "board-herdr.asks", "cmd-shift-b": "board-herdr.open-board"}` and under `global`
+  "board-herdr.close", "cmd-shift-a": "board-herdr.asks", "cmd-shift-b": "board-herdr.open-board", "cmd-shift-g":
+  "board-herdr.prs"}` and under `global`
   `"cmd-shift-b": "layout.switch:board-herdr"`.
 - `~/.config/herdr-app/asks.json` is optional (Asks' settings: `label`, `log`, `classify`, `model`, `trailing_questions`,
   `toast`, `debug`); the board's default `log` is `~/.config/herdr-app/decisions.md`.
@@ -258,6 +329,13 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   agent's old label once.
 - `herdr-app shot` returns the last frame drawn; while Herdr is in the background it may be stale.
 - Limits: 4 agents listed per card, 6 options on a card, 60 Asks records kept 24 h, 6 Linear suggestions.
+- **PRs:** a page of 50 PRs of a busy repo with every field asked times out on GitHub (HTTP 502/504): team repos read
+  20 a page, and a 5xx is tried once more. An org GitHub doesn't know answers with no PRs, not an error. Avatars are
+  initials: `image()` only loads files from the app's folder. `ScrollHandle.new()` can't run while drawing: make every
+  column's handle in `init`. Text in a flex column widens it past the others: give columns a computed `w`.
+- **PRs limits:** only a PR's first 100 changed files are matched against CODEOWNERS; only its last 20 review requests,
+  50 reviews and 50 commits are read; an approval on others' PRs wins over a conflict (it goes to Pronto para merge
+  with the blocker shown). `prs.json` is yours: the shipped package has none, and the view asks for an org.
 - Assumes git; gh for PRs (without it the PR facts and the week's bars are empty); Claude Code and/or OpenCode for New
   agent; `hc` and `claude` for Asks.
 
@@ -284,4 +362,9 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   screen says `→ Green`, and `decisions.md` gains the line.
 - An agent asked to ask in plain text whether to use tabs or spaces gets a QUESTION within about 10 s; answering sends
   the option as a message and the agent replies.
+- `node --test test/*.test.mjs` in `mods/board-herdr` passes.
+- ⌘⇧G shows both lanes with your open PRs of the org (`gh search prs --author=@me --state=open --owner=<org>` gives the
+  same number as `Meus PRs · N`), and ⌘⇧G again goes back to the board; the sidebar's PRs count equals Precisa da minha
+  revisão + Comentários a resolver + Draft: revisar para liberar.
+- Removing a team repo in the gear (or in `prs.json`) takes its unrequested PRs out of `Precisa do meu time` within 2 min.
 - ⌘⇧B from another layout opens this one on the board; ⌘E goes from the board to the agent you were on and back.

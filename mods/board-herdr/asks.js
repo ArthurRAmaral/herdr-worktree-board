@@ -19,7 +19,38 @@ export const questionsOf = (ask) => (ask.questions ?? []).map((q) => typeof q ==
 // the asks still waiting on you (sending and failed ones stay on screen until they land)
 export const waitingAsks = () => readState().asks.filter((a) => a.state === "pending" || a.state === "sending" || a.state === "failed");
 // what a key or a click can answer at once: an ask with options to pick
-export const pickable = (ask) => ask && ask.state === "pending" && ask.options.length > 0 && ask.kind !== "UNCLEAR";
+// (Claude Code's own questions wait for the dialog's reading: one may turn out to be a form)
+export const pickable = (ask) => ask && ask.state === "pending" && ask.options.length > 0 && ask.kind !== "UNCLEAR" && !ask.form
+  && (ask.enriched || ask.app !== "claude-code");
+
+// an option's label without the agent's "(Recommended)"
+export const plain = (s) => String(s ?? "").replace(/\s*\((recommended|recomendad[oa])\)\s*/i, " ").trim();
+// a form's answers as one line: "Itens → A, B · Formato → C"
+export const formLine = (form, picks) => form.map((q, i) => `${q.header || `Q${i + 1}`} → ${[...picks[i].picks.map((j) => plain(q.options[j].label)), ...(picks[i].text ? [picks[i].text] : [])].join(", ")}`).join(" · ");
+const ROW = /^\s*(❯\s*)?(\d{1,2})\.\s+(?:\[(.)\]\s+)?(.*?)\s*$/;
+
+// Claude Code's question dialog as its screen shows it now: which question is up (its index in `form`, or "review"
+// for the last step), its numbered rows with their boxes ([✔] ticked, null for a question with one answer), and the
+// cursor's row ("next" on the Next / Submit line under a question with several answers).
+export function dialogOf(text, form) {
+  const lines = (text ?? "").replace(/\r/g, "").split("\n");
+  let top = -1;
+  for (let i = lines.length - 1; i >= 0; i--) if (/^\s*←\s.*→\s*$/.test(lines[i])) { top = i; break; }
+  if (top < 0) return null;
+  const rows = [], body = [];
+  let cursor = null;
+  for (const l of lines.slice(top + 1)) {
+    if (/^\s*[─━═]{10,}\s*$/.test(l)) break;
+    body.push(l);
+    const m = ROW.exec(l);
+    if (!m) { if (/^\s*❯/.test(l)) cursor = "next"; continue; }
+    rows.push({ n: Number(m[2]), ticked: m[3] == null ? null : m[3] !== " ", label: m[4] });
+    if (m[1]) cursor = Number(m[2]);
+  }
+  const flat = one(body.join(" "));
+  const view = /Ready to submit your answers|Review your answers/.test(flat) ? "review" : form.findIndex((q) => flat.includes(one(q.text).slice(0, 40)));
+  return { view: view === -1 ? null : view, rows, cursor };
+}
 
 function iconOf(p, size, color) {
   if (!p?.icon) return div().size(size).rounded(4).bg(color).opacity(0.3);
@@ -80,6 +111,79 @@ export class Answerer {
     });
   }
 
+  // Fill Claude Code's question form, one question (tab) at a time, reading the screen after each step: a number picks
+  // an answer (and moves on) under a question with one answer, and turns a box on or off under one with several (→
+  // moves on). A typed answer goes in the "Type something" row. The last step reviews the answers: Submit.
+  // picks: one { picks: [option index], text } per question.
+  answerForm(ask, picks, cx) {
+    if (!stillAsking(ask)) return this.stale(ask);
+    const form = ask.form;
+    const sentTurn = liveTerminal(ask.address)?.turn ?? ask.turn ?? 0;
+    this.set(ask.id, { state: "sending", answer: formLine(form, picks), chosen: { form: picks }, error: null, sent_turn: sentTurn, sent_at: Date.now() });
+    this.sent?.();
+    this.deliver(ask, cx, async (sleep) => {
+      const keys = async (...k) => {
+        if (!k.length) return;
+        const r = await hc(["keys", ask.address, ...k]);
+        if (r.code !== 0) throw new Error(one(r.stderr) || "Could not press a key");
+      };
+      const paste = async (text) => {
+        const r = await hc(["send", "--force", ask.address, text]);
+        if (r.code !== 0) throw new Error(one(r.stderr) || "Could not type the answer");
+      };
+      // the dialog once `ok` holds (or as it is after ~2.5 s)
+      const look = async (ok = () => true) => {
+        let d = null;
+        for (let i = 0; i < 12; i++) {
+          await sleep(200);
+          const r = await hc(["read", ask.address, "--json"]);
+          if (r.code === 0) d = dialogOf(JSON.parse(r.stdout).text, form);
+          if (d && ok(d)) return d;
+        }
+        return d;
+      };
+      const textRow = (q) => q.options.length + 1;
+      // On a typed-answer row, ← → move in the text: step up off it first.
+      const offText = async (d) => { const q = form[d.view]; if (q && d.cursor === textRow(q)) { await keys("up"); return look((x) => x.cursor !== textRow(q)); } return d; };
+      let d = await look();
+      if (!d) throw new Error("The question isn't on the agent's screen any more");
+      // Back to the first question: a try that stopped half way leaves the dialog further on.
+      for (let guard = 0; d.view !== 0 && guard <= form.length; guard++) { d = await offText(d); await keys("left"); d = await look((x) => x.view === 0); }
+      for (let i = 0; i < form.length; i++) {
+        const q = form[i], p = picks[i], tr = textRow(q);
+        d = await look((x) => x.view === i);
+        if (d?.view !== i) throw new Error(`Question ${i + 1} (${q.header || one(q.text).slice(0, 30)}) didn't come up`);
+        if (!q.multi) {
+          if (p.text) { await keys(String(tr)); await look((x) => x.cursor === tr); await paste(p.text); }
+          else await keys(String(p.picks[0] + 1));
+          continue;
+        }
+        d = await offText(d);
+        const want = (j) => p.picks.includes(j);
+        const right = (x) => q.options.every((_, j) => { const r = x.rows.find((r) => r.n === j + 1); return !r || r.ticked === want(j); });
+        await keys(...q.options.map((_, j) => j).filter((j) => { const r = d.rows.find((r) => r.n === j + 1); return r && r.ticked !== want(j); }).map((j) => String(j + 1)));
+        d = await look(right);
+        if (!d || !right(d)) throw new Error(`Couldn't tick the answers of question ${i + 1}`);
+        if (p.text) {
+          const at = typeof d.cursor === "number" ? d.cursor : 1;
+          await keys(...Array(Math.max(0, tr - at)).fill("down"));
+          await look((x) => x.cursor === tr);
+          // typing ticks the row and paste's Enter flips it: tick it again if it ended off
+          await paste(p.text);
+          d = await look((x) => x.rows.some((r) => r.n === tr && !/^Type something/.test(r.label)));
+          if (d?.rows.find((r) => r.n === tr)?.ticked === false) await keys("enter");
+          await keys("tab");
+          await look((x) => x.cursor === "next");
+          await keys("enter");
+        } else await keys("right");
+      }
+      d = await look((x) => x.view === "review");
+      if (d?.view !== "review") throw new Error("The answers' review step didn't come up");
+      await keys(String(d.rows.find((r) => /^submit/i.test(r.label))?.n ?? 1));
+      return this.settle(ask.address, sleep, (g) => !(g.state === "blocked" && g.msg === ask.msg));
+    });
+  }
+
   // Free text into a dialog (Claude Code's question dialog takes typed text as its own answer) or to an idle agent.
   sendText(ask, text, cx) {
     const live = stillAsking(ask);
@@ -127,6 +231,7 @@ export class Answerer {
     // The earlier answer may have landed after the panel gave up: never send it twice.
     const t = liveTerminal(ask.address);
     if (t && ask.sent_turn != null && (t.turn ?? 0) > ask.sent_turn) return this.set(ask.id, { state: "delivered", answered_at: Date.now(), error: null, note: "Picked up late" });
+    if (ask.chosen?.form) return this.answerForm(ask, ask.chosen.form, cx);
     if (ask.chosen?.text) return this.sendText(ask, ask.chosen.text, cx);
     if (ask.chosen) return this.answer(ask, ask.chosen, cx);
     this.set(ask.id, { state: "pending", error: null });
@@ -143,11 +248,17 @@ export class AsksPanel extends Answerer {
     // Multi-question cards: which question is unfolded, and the answers drafted so far
     // ({ [ask.id]: { [index]: text } }). Sent together with "Send answers".
     this.openQ = null; this.otherQ = null; this.drafts = {};
+    // Forms (Claude Code's own questions): the answers picked so far, { [ask.id]: [{ picks, text }] } (see formOf).
+    this.forms = {};
     this.input = InputState.new({ placeholder: "Type a different answer, Enter to send" });
     this.input.on("change", (_e, cx) => { this.otherText = this.input.value(); cx.notify(); });
     this.input.on("submit", (_e, cx) => {
       const text = this.otherText.trim();
-      if (this.otherQ) { if (text) this.draft(this.otherQ.id, this.otherQ.i, text); this.otherQ = null; this.input.set_value(""); this.otherText = ""; cx.notify(); return; }
+      if (this.otherQ) {
+        const form = readState().asks.find((a) => a.id === this.otherQ.id)?.form;
+        if (text && form) { const p = this.formOf({ id: this.otherQ.id, form })[this.otherQ.i]; p.text = text; if (!form[this.otherQ.i].multi) p.picks = []; }
+        else if (text) this.draft(this.otherQ.id, this.otherQ.i, text);
+        this.otherQ = null; this.input.set_value(""); this.otherText = ""; cx.notify(); return; }
       const ask = readState().asks.find((a) => a.id === this.other); if (ask && text) this.sendText(ask, text, cx);
     });
     this.sent = () => { this.other = null; this.input.set_value(""); this.otherText = ""; };
@@ -165,6 +276,59 @@ export class AsksPanel extends Answerer {
         cx.notify();
       }
     });
+  }
+
+  // A form's answers so far; a question with one answer starts on the one its agent recommends.
+  formOf(ask) {
+    return this.forms[ask.id] ??= ask.form.map((q) => ({ picks: !q.multi && q.recommended != null ? [q.recommended] : [], text: null }));
+  }
+
+  // each question of a form: its tab name and words, then its options to pick (a box each when it takes several) and
+  // a typed answer of your own
+  formView(ask, t, sending) {
+    const sel = this.formOf(ask);
+    const field = (q, i) => {
+      const p = sel[i], typing = this.otherQ?.id === ask.id && this.otherQ.i === i;
+      const mark = (on) => q.multi
+        ? div().w(14).h(14).flex_none().rounded(3).border_1().border_color(on ? t.accent : t.muted).bg(on ? t.accent : t.surface).flex().items_center().justify_center()
+          .when(on, (el) => el.child(svg("mods/board-herdr/ask-check.svg").size(10).text_color(t.background)))
+        : div().w(14).h(14).flex_none().rounded_full().border_1().border_color(on ? t.accent : t.muted).bg(t.surface).flex().items_center().justify_center()
+          .when(on, (el) => el.child(div().w(6).h(6).rounded_full().bg(t.accent)));
+      const pick = (j) => (_e, cx) => {
+        if (q.multi) p.picks = p.picks.includes(j) ? p.picks.filter((x) => x !== j) : [...p.picks, j].sort((a, b) => a - b);
+        else { p.picks = [j]; p.text = null; }
+        cx.notify();
+      };
+      return v_flex().w_full().gap(4)
+        .child(h_flex().w_full().gap(6).items_start()
+          .when(Boolean(q.header), (el) => el.child(div().px(5).h(16).mt(1).flex_none().flex().items_center().rounded(4).text_size(10).font_semibold().bg(t.raised).text_color(t.muted).child(q.header)))
+          .child(div().flex_1().min_w(0).text_size(12.5).text_color(t.foreground).child(q.text)))
+        .when(q.multi, (el) => el.child(div().text_size(10.5).text_color(t.dim).child("Pick any")))
+        .children(q.options.map((o, j) => {
+          const on = p.picks.includes(j);
+          return h_flex().id(`fo-${ask.id}-${i}-${j}`).w_full().px(8).py(5).gap(8).items_start().rounded(7).border_1()
+            .border_color(on ? t.accent : t.border).bg(t.background)
+            .when(!sending, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click(pick(j)))
+            .child(div().mt(1).child(mark(on)))
+            .child(v_flex().flex_1().min_w(0).gap(1)
+              .child(h_flex().gap(6).items_center()
+                .child(div().flex_1().min_w(0).truncate().text_size(12).tooltip(o.label).child(plain(o.label)))
+                .when(q.recommended === j, (el) => el.child(div().text_size(10).flex_none().text_color(t.accent).child("recommends"))))
+              .when(Boolean(o.detail), (el) => el.child(div().text_size(11).text_color(t.dim).truncate().tooltip(o.detail).child(o.detail))));
+        }))
+        .child(typing
+          ? Input.new(this.input).w_full().h(30).px(10).rounded(7).border_1().border_color(t.accent).bg(t.background).text_size(12).text_color(t.foreground)
+          : h_flex().id(`ft-${ask.id}-${i}`).w_full().px(8).py(4).gap(8).items_center().rounded(7).text_size(11.5)
+              .border_1().border_color(p.text ? t.accent : t.background).text_color(p.text ? t.foreground : t.muted)
+              .when(!sending, (el) => el.cursor_pointer().hover((s) => s.text_color(t.foreground)).on_click((_e, cx) => {
+                this.otherQ = { id: ask.id, i }; this.other = null; this.input.set_value(p.text ?? ""); this.otherText = p.text ?? ""; this.input.focus(); cx.notify();
+              }))
+              .child(svg("mods/board-herdr/ask-send.svg").size(11).flex_none().text_color(t.dim))
+              .child(div().flex_1().min_w(0).truncate().child(p.text ? `“${p.text}”` : "Other answer…"))
+              .when(Boolean(p.text) && !sending, (el) => el.child(div().id(`fx-${ask.id}-${i}`).flex_none().text_color(t.dim).hover((s) => s.text_color(t.foreground))
+                .on_click((_e, cx) => { cx.stop_propagation(); p.text = null; cx.notify(); }).child(svg("mods/board-herdr/ask-x.svg").size(10)))));
+    };
+    return v_flex().w_full().gap(12).children(ask.form.map(field));
   }
 
   draft(id, i, text) { (this.drafts[id] ??= {})[i] = text; this.openQ = null; }
@@ -205,7 +369,8 @@ export class AsksPanel extends Answerer {
       .child(h_flex().gap(8).items_center().child(chip(ask.kind, color))
         .when(Boolean(ask.context), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).tooltip(ask.context).child(ask.context))))
       .child(div().w_full().text_size(13).text_color(t.foreground).child(ask.question || (ask.enriched ? "Needs you in the terminal" : "Reading the dialog…")))
-      .when(ask.options.length > 0 && ask.kind !== "UNCLEAR", (el) => el.child(v_flex().w_full().gap(5).children(ask.options.map(option))))
+      .when(ask.options.length > 0 && ask.kind !== "UNCLEAR" && !ask.form && (ask.enriched || ask.app !== "claude-code"), (el) => el.child(v_flex().w_full().gap(5).children(ask.options.map(option))))
+      .when(Boolean(ask.form), (el) => el.child(this.formView(ask, t, sending)))
       .when(questions.length > 1, (el) => el.child(v_flex().w_full().gap(4).children(questions.map((q, i) => {
         const key = `${ask.id}:${i}`, open = this.openQ === key, chosen = drafts[i];
         const pick = (text) => (_e, cx) => { this.draft(ask.id, i, text); this.otherQ = null; cx.notify(); };
@@ -233,8 +398,14 @@ export class AsksPanel extends Answerer {
       .when(failed, (el) => el.child(div().text_size(11.5).text_color(t.blocked).child(ask.error ?? "Failed")))
       .child(h_flex().gap(6).items_center().flex_wrap()
         .when(failed, (el) => el.child(action(`retry-${ask.id}`, "mods/board-herdr/ask-send.svg", "Retry", (cx) => this.retry(ask, cx), true)))
+        .when(Boolean(ask.form) && !sending && !failed, (el) => {
+          const sel = this.formOf(ask), ready = sel.filter((p) => p.picks.length || p.text).length, all = ready === ask.form.length;
+          return el.child(all
+            ? action(`send-${ask.id}`, "mods/board-herdr/ask-send.svg", "Send answers", (cx) => this.answerForm(ask, sel, cx), true)
+            : div().text_size(11).text_color(t.dim).child(`${ready} of ${ask.form.length} answered`));
+        })
         .when(!sending && drafted > 0, (el) => el.child(action(`send-${ask.id}`, "mods/board-herdr/ask-send.svg", `Send answers (${drafted}/${questions.length})`, (cx) => this.sendDrafts(ask, cx), true)))
-        .when(!sending && ask.kind !== "UNCLEAR" && ask.kind !== "APPROVAL", (el) => el.child(action(`other-${ask.id}`, "mods/board-herdr/ask-send.svg", this.other === ask.id ? "Cancel" : ask.options.length ? "Other answer" : "Answer", (cx) => {
+        .when(!sending && !ask.form && ask.kind !== "UNCLEAR" && ask.kind !== "APPROVAL", (el) => el.child(action(`other-${ask.id}`, "mods/board-herdr/ask-send.svg", this.other === ask.id ? "Cancel" : ask.options.length ? "Other answer" : "Answer", (cx) => {
           this.other = this.other === ask.id ? null : ask.id;
           if (this.other) this.input.focus();
           cx.notify();

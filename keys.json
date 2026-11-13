@@ -4,7 +4,8 @@
     "cmd-n": "board-herdr.new-agent",
     "cmd-w": "board-herdr.close",
     "cmd-shift-a": "board-herdr.asks",
-    "cmd-shift-b": "board-herdr.open-board"
+    "cmd-shift-b": "board-herdr.open-board",
+    "cmd-shift-g": "board-herdr.prs"
   },
   "global": {
     "cmd-shift-b": "layout.switch:board-herdr"

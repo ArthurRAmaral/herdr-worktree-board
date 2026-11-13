@@ -149,6 +149,16 @@
                   "lone": false
                 }
               }
+            },
+            {
+              "id": "prs",
+              "type": "block",
+              "content": {
+                "mod": "board-herdr",
+                "props": {
+                  "part": "prs"
+                }
+              }
             }
           ]
         },

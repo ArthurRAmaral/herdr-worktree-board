@@ -89,6 +89,30 @@ export function parseScreen(text) {
   return { options, cursor, context, question };
 }
 
+// Claude Code's question dialog can hold several questions (one tab each) and ones that take several answers, but
+// its status report names only the first. The session's transcript has the whole tool call: the newest
+// AskUserQuestion in the agent's folder that holds the reported question.
+export async function readForm(cwd, question) {
+  if (!cwd || !question) return null;
+  const r = await exec("sh", ["-c", 'for f in $(ls -t "$HOME/.claude/projects/$1"/*.jsonl 2>/dev/null | head -3); do tail -c 600000 "$f" | grep -F AskUserQuestion | tail -n 3 | awk \'{ l[NR] = $0 } END { for (i = NR; i > 0; i--) print l[i] }\'; done',
+    "asks", cwd.replace(/[^A-Za-z0-9]/g, "-")]);
+  if (r.code !== 0) return null;
+  const key = (s) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, 40);
+  for (const line of r.stdout.split("\n")) {
+    let o; try { o = JSON.parse(line); } catch { continue; }
+    const blocks = Array.isArray(o.message?.content) ? o.message.content : [];
+    const use = [...blocks].reverse().find((b) => b?.type === "tool_use" && b.name === "AskUserQuestion");
+    const qs = use?.input?.questions;
+    if (!Array.isArray(qs) || !qs.some((q) => key(q.question) === key(question))) continue;
+    return qs.map((q) => {
+      const options = (q.options ?? []).map((o, i) => ({ n: i + 1, label: String(o.label ?? ""), detail: String(o.description ?? "") }));
+      const rec = options.findIndex((o) => /\((recommended|recomendad[oa])\)/i.test(o.label));
+      return { text: String(q.question ?? ""), header: String(q.header ?? ""), multi: !!q.multiSelect, options, recommended: rec >= 0 ? rec : null };
+    });
+  }
+  return null;
+}
+
 // Claude Code says what it wants in its status report: no model needed.
 export function parseReport(report) {
   const msg = report?.msg ?? "";
@@ -140,7 +164,7 @@ export class Engine {
     const live = terminals().filter((t) => t.state === "live");
     const byAddress = new Map(live.map((t) => [t.address, t]));
     const list = agents();
-    const fresh = [], toCheck = [];
+    const fresh = [], toCheck = [], reread = [];
     update((s) => {
       for (const t of live) {
         if (statusOf(t) !== "blocked") continue;
@@ -150,6 +174,8 @@ export class Engine {
         if (known) {
           // Marked stale while the dialog is in fact still up (a reload, a slow report): bring it back.
           if (known.state === "stale") { known.state = "pending"; known.note = null; delete known.ended_at; }
+          // Read before forms were: read it again for its other questions.
+          if (known.state === "pending" && known.source === "report" && known.app === "claude-code" && known.enriched && !known.form_checked) reread.push(known.id);
           continue;
         }
         for (const a of s.asks) if (a.address === t.address && a.state === "pending") { a.state = "stale"; a.note = "Resolved in terminal"; a.ended_at = now; }
@@ -206,6 +232,7 @@ export class Engine {
     });
     if (this.config) this.started = true;
     for (const t of toCheck) this.checkTurn(t, list.find((x) => x.address === t.address) ?? null, cx);
+    for (const id of reread) this.enrich(id, cx);
     for (const ask of fresh) {
       this.enrich(ask.id, cx);
       if (this.config?.toast !== false && !this.notified.has(ask.id) && focused()?.terminal !== ask.address) {
@@ -255,6 +282,16 @@ export class Engine {
               patch.recommended = model.recommended; patch.source = patch.source === "screen" ? "screen+model" : "model"; patch.confidence = model.confidence;
             } else if (ask.source !== "report") { patch.kind = "UNCLEAR"; }
           }
+        }
+        // Several questions, or one with several answers: a form, filled in the panel and sent in one go.
+        if (ask.source === "report" && ask.app === "claude-code" && /^answer:/.test(ask.msg)) {
+          patch.form_checked = true;
+          let form = null;
+          try { form = await readForm(ask.cwd, ask.question); } catch {}
+          if (form && (form.length > 1 || form.some((q) => q.multi))) Object.assign(patch, {
+            form, options: [], recommended: null, kind: "DECISION",
+            question: form.length > 1 ? `${form.length} questions: ${form.map((q, i) => q.header || `Q${i + 1}`).join(" · ")}` : form[0].text,
+          });
         }
         if (patch.kind !== "UNCLEAR" && !(patch.options?.length ?? ask.options.length) && (patch.kind ?? ask.kind) !== "QUESTION" && ask.source !== "report") patch.kind = "UNCLEAR";
         update((s) => { const a = s.asks.find((x) => x.id === id); if (a) Object.assign(a, patch); });
