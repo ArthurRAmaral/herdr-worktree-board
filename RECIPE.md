@@ -1,11 +1,14 @@
 # Board (Herdr)
 
 A Linear-style board of your git worktrees, fed by Herdr itself, git and gh. Every worktree is a card in a stage you
-choose (Todo, In progress, In review, Watch, Temp, Done, Archived, Paused); on it, every agent working there and the
-sub-agents they started, counted by status, its branch, commits, uncommitted lines and pull request, and the question
-an agent is waiting on, with its options to click. A sidebar lists the worktrees by stage, most recently used first,
-with a link to each agent. New agent (⌘N) makes a worktree of the shown repo and starts Claude Code or OpenCode in it
-on your message plus a Context block (a Linear issue, a PR, a Slack message, any link). Done removes the worktree after
+choose (Perpétuo, Todo, In progress, In review, Watch, Temp, Done, Archived, Paused), dragged between columns or
+within one; on it, every agent working there and the sub-agents they started, counted by status, its branch, commits,
+uncommitted lines and pull request, the machine it is on, and the question an agent is waiting on, with every option
+to click. A click on a card shows its agent beside the board, which stays clickable; Minimize on the bar over an agent
+gives the board back. A sidebar lists the worktrees by stage, in the order you drag them to, with a link to each agent.
+New agent (⌘N) makes a worktree of the shown repo, on this computer or one of Herdr's ssh machines, and starts Claude
+Code or OpenCode in it on your message plus a Context block (a Linear issue, a PR, a Slack message, any link), or your
+orchestrator skill on a Linear issue. Done removes the worktree after
 3 days; ⌘W on a worktree's last tab removes it at once. A PRs view (⌘⇧G) lays out the open pull requests that wait on
 you, other people's and yours, as a kanban of where each one stands. The whole board works from the keyboard.
 
@@ -30,16 +33,23 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   - `Board` row (36 px, columns icon, count of worktrees not archived); selected when the board shows with no column
     marked.
   - `Asks` row (34 px, speech-bubble icon, `⌘⇧A` hint, a count pill: yellow when questions wait in scope).
-  - The scope switch: two segments, `Repo: <name>` and `All`, 28 px.
+  - The scope switch: two segments, `Repo: <name>` and `All`, 28 px. With spaces on more than one machine, a machine
+    switch under it: `All machines`, `This Mac` (`This computer` elsewhere), then each machine by name, each with a
+    monitor icon (`machine.svg`).
   - A needs-you row when an agent waits (yellow on `#1f1a10`, pulsing dot): `2 need you`, plus `N elsewhere` when the
     scope hides some; a click goes to the oldest question.
   - One group per stage: a 3 px bar in the stage's color, a foldable header (`▾ Todo  3`, and a columns button that
-    opens the board on that column), then each worktree (30 px: status icon, its name, `2●` waiting, `1◌` working, `+3`
-    sub-agents) and, when it has more than one agent, each agent under it (26 px, indented 28 px, its age). Archived
-    starts folded. A hint at the bottom: `right-click a worktree to change its stage`.
+    opens the board on that column), then each worktree (30 px: status icon, its name, a machine tag when it's on
+    another machine, `2●` waiting, `1◌` working, `+3` sub-agents) and, when it has more than one agent, each agent under
+    it (26 px, indented 28 px, its age). Archived starts folded. Rows drag: a 2 px accent line shows where one lands
+    (above or below the row under the pointer, by its half; a group's header takes it at that group's top). A hint at
+    the bottom: `drag to reorder · right-click for the stage`.
   - Narrower than 160 px: a 40 px rail of icons and counts, one dot per stage.
-- **Main** is a stack: `board` (the board) and `work` (the shown tab's panes as 6 px-radius cards, gap 6, border
-  `#1e1e20`, focused `#625187`).
+- **Main** is a stack: `board` (the board) and `work`: a 30 px agent bar (below) over the shown tab's panes as 6
+  px-radius cards, gap 6, border `#1e1e20`, focused `#625187`.
+  - **The agent bar** (`#101012`, a bottom line): the agent's status icon, what it says it's doing (12 px), its
+    worktree (10 px mono dim), and at the right `Minimize` (22 px, bordered, a chevron-over-a-line icon,
+    `minimize.svg`) with `⌘E` in the main stack; in the side, no key. Without an agent, the tab's name.
   - **Numbers**, five tiles: `LANDED TODAY` (green, with 7 bars of your merged PRs this week, today's solid),
     `NEEDS YOU`, `WORKING` (with `+ N of M sub-agents`), `IN REVIEW`, `OPEN PRS`.
   - **Next move** banner, when someone waits: `<worktree> asks: "<question>"`, project · agent · `waiting 4m`,
@@ -47,20 +57,27 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   - **Chips row**: the scope switch, `N elsewhere`, a divider, project filter chips (`all 5`, then each project with
     its count and a yellow dot when one of its worktrees waits), `N leftover worktrees · clean up` when there are some,
     then a 170 px search field (`/`), a hint (`S stage · ? keys`), `+ New agent  N` and `◎ Focus  F`.
+  - `devbox offline · its cards show the last read` (11 px mono, muted) under the numbers while Herdr can't reach a
+    machine.
   - **Columns**, one per stage: header `▾ ● IN PROGRESS 2` (click folds it). A folded column is 140 px, an empty one
-    118 px; columns with cards share the rest but never go below 260 px, and below that only the columns row scrolls
-    sideways (the numbers and chips keep the view's width). Each column scrolls on its own. The column the sidebar
-    marked has a border and a tint in its color.
+    118 px; columns with cards share the rest but never go below 260 px, and a column whose card asks a question widens
+    to fit its options (longest option label × 6.6 + 100 px, or the question's length ÷ 3, up to 480 px). When they
+    don't fit, only the columns row pans sideways (the numbers and chips keep the view's width): drag the background
+    (past 4 px, with the grabbing cursor), a trackpad's sideways scroll, or the wheel with Shift; a thin bar at the
+    bottom shows where you are, and moving the selection pans to its column. Each column scrolls on its own. The column
+    the sidebar marked has a border and a tint in its color.
   - **A card**: a 3 px left bar in the worktree's status color; the project chip (one of 8 colors, from its name), the
-    branch, the stage button (`● In progress ▾`, tinted in the stage color); the title (14 px semibold); the agents
+    branch, a machine tag (its name, such as `devbox`, or `devbox · offline` dimmed) when it's on another machine, the
+    stage button (`● In progress ▾`, tinted in the stage color); the title (14 px semibold); the agents
     counted (`2 waiting · 1 working`) and, with sub-agents, `· 3 sub-agents` counted too; up to 4 agent lines (status
     icon, program icon, what it says it's doing, a `+2` sub-agent pill, its age) and `+N more`; the question box; the
     facts (`3 commits`, `2 uncommitted`, `+120 −8`, `1 unpushed`, `PR #42`, `✓ checks` / `✗ checks` / `checks running`,
     `conflicts`, `merge blocked`, `behind base`, and in Done `deletes in 2d` or `uncommitted: won't
     auto-delete`); then the actions. A card where someone waits is `#1b1912`; the selected card has an accent border.
   - **The question box** (`#241f12`): with an Asks record, its kind (`APPROVAL` yellow, `DECISION` accent, `QUESTION`
-    work, `UNCLEAR` dim), the agent, the question, and up to 6 options as 24 px rows (number, label, `recommended` on
-    the agent's pick, `recommended · Y` on the selected card); several questions at once say `3 questions: answer them in
+    work, `UNCLEAR` dim), the agent, the question, and every option as a row at least 24 px high that wraps (number,
+    label, the option's description under it in 11 px muted when the agent gave one, `recommended` on the agent's pick,
+    `recommended · Y` on the selected card); several questions at once say `3 questions: answer them in
     Asks (R)`; a failed answer shows its error and Retry. Without a record, `ASKS YOU` and the last question line on the
     agent's screen.
   - **Actions**: while someone waits, `Answer` (Focus), `Asks R` (or `Reply R`), `Go to agent`, `+ Agent`; otherwise
@@ -68,22 +85,32 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
     `Open` (or `Open terminal`), `+ Agent`, and in Done `Delete now`. Merge and Ship ask first on the card (`Yes y` /
     `No n`); a running or failed one shows its line on the card.
   - `?` shows a key list in the board's bottom-right corner (350 px, `#18181b`).
+  - **Dragging a card**: the card dims; over another card a 3 px accent line shows above or below it (by its half),
+    over another column's empty part the column tints. Dropping in another column sets that stage, as the stage
+    picker would; the place is kept in the same order the sidebar uses.
 - **Asks panel** (hidden; 380 px, min 300, max 720) at the board's right: header with the icon, `Asks`, the scope
   (`workspace` or `All worktrees`), an `All` toggle and ×; a line `1 waiting · 3 answered today · ⌘⇧A hides`; one card
   per waiting question (agent, worktree, age, kind chip, context line, the question, each option with its description
   and `recommends`, a multi-question list that unfolds each question's choices, Claude Code's question forms (below),
   `Other answer` / `Answer` with a text
   field, `Open terminal`, `Dismiss`); a foldable `Answered N` list.
-- **Focus terminal** (hidden; weight 0.5, min 360, max 1000) and **side** (hidden, 640 px): an agent's live terminal
-  beside the board.
-- **Bottom bar**: right-aligned, the last git or gh problem in red, `read 11:57`, the clock.
+- **Focus terminal** (hidden; weight 0.5, min 360, max 1000): the agent bar over an agent's live terminal, beside the
+  board; **side** (hidden, 640 px), the shown tab beside it.
+- **Bottom bar**: right-aligned, the last git or gh problem in red, `devbox offline` (muted, a dim dot) while a machine
+  can't be reached, `read 11:57`, the clock.
 - **Dialogs**, all `#18181b`:
-  - **New agent** (540×720): `AGENT` (Claude Code and OpenCode as 52 px cards with icon, command and a radio; `not
-    installed` dims one); `WHERE` (`New worktree` with `repo · from main · ~/.herdr/worktrees/<repo>/<branch>`, or `In
+  - **New agent** (540×770): `AGENT` (Claude Code and OpenCode as 52 px cards with icon, command and a radio; `not
+    installed` dims one); `WHERE` (with spaces on more than one machine, a machine picker at the label's right: `This
+    Mac` and each machine; picking one prefers a space there of the same repo, a main checkout first, and asks that
+    machine for its agents, the skill and the repo; `no space on <machine> to start from` when it has none; then `New
+    worktree` with `repo · from main · ~/.herdr/worktrees/<repo>/<branch>`, or `In
     this worktree`); for a new worktree `BRANCH` (mono input, `empty: <the branch it will get>`, `on the board: <the
     title it will get>`) and `STAGE` (8 chips); `CONTEXT` (one input; your Linear issues drop down as you type; each
     reference a removable chip colored by kind: Linear `#8b93f8`, PR `#53cf91`, Slack `#e88cc8`, link `#6fb3f2`, note
-    `#8a898e`); `FIRST MESSAGE (OPTIONAL)` (or `MESSAGE (OPTIONAL: EMPTY STARTS ON THE ISSUE)`); the error in red; a hint
+    `#8a898e`); with a Linear issue and the orchestrator skill (below) installed on that machine, a 42 px checkbox row
+    `Orchestrate`, on by default, `/<skill> in Claude Code · its agents here`, which turns the agent into Claude Code
+    and the message label into `WHAT THE ORCHESTRATOR SHOULD DO (REQUIRED)`; `FIRST MESSAGE (OPTIONAL)` (or `MESSAGE
+    (OPTIONAL: EMPTY STARTS ON THE ISSUE)`); the error in red; a hint
     (`it starts working; the board stays` or `its terminal opens, to type in`), `Cancel`, `Start ⏎`.
   - **Stage picker** (250 px wide, 44 + 30 per stage + 40 high): `MOVE <title> TO`, one 30 px row per stage (dot, name,
     `✓` on the current one, its number), and for a worktree a red `× Delete worktree…  ⌫`. A popup at the pointer for a
@@ -116,7 +143,27 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
 
 ## How it behaves
 
-- **Worktrees, not agents.** Each Herdr space is one card. A space's agents come from `agents()`; its sub-agents are
+- **Worktrees, not agents.** Each Herdr space is one card. Its main agent, where a click on the worktree goes, is one
+  no other agent in that space started (by the `parent` chain), the one with no parent at all first, then the oldest
+  (hc addresses count up in base 36: `t9z` before `ta0`); never a sub-agent.
+- **Your order** (`boardh.order`: space ids and agent addresses), shared by the sidebar and the board's columns: a new
+  worktree comes in on top, a new agent at the end of its worktree, a worktree that changes stage at the top; a drag
+  moves a key before or after the one it's dropped on; anything not in the order goes last, as it came. Pure rules in
+  `nav-order.js`.
+- **Machines**: a space's `machine` (null: this computer). git and gh for its folder run there (`exec(…, {on})`), and
+  errors say which (`gh on devbox: …`). A machine whose layout is `unavailable` in `machines()`, or whose call fails as
+  unreachable, is skipped for the rest of that read: its cards keep the last read and say `offline`, no red error. The
+  machine filter (`boardh.machine`: null all, `""` this computer, else a name) applies to the board and the sidebar;
+  leftover worktrees show only for this computer or all.
+- **An agent beside the board**: a click on a card (or an agent line on it) shows that agent in `focus-term`
+  (`agent.focus`, the board keeps the keyboard), and another click shows another; a double-click goes to it. Space
+  does the same for the selection and follows it; F (Focus) opens it on the oldest question with the keyboard in the
+  terminal, to type the answer. Esc on the board closes it. The board is never dimmed.
+- **Minimize**: in the side, it hides `focus-term`, clears `boardh.peek` and `boardh.focus`, and sets `boardh.refocus`
+  so the board takes the keyboard; in the main stack, it selects `board` and the board takes the keyboard, the card
+  still selected. Going to an agent's whole screen (a sidebar row, a top-bar tab, Open) hides `focus-term` first:
+  `pane.focus {terminal}` prefers a visible layout block showing that terminal, so with the side open the agent
+  would show twice and the keyboard would go to the side. A space's agents come from `agents()`; its sub-agents are
   the live `terminals()` whose chain of `parent`s (up to 8 hops) reaches one of them. Agents sort the most urgent first
   (blocked > done > working > idle), then the one you used last.
 - **A worktree's name**: the name you gave the space, else the title New agent gave it (the Linear issue's title, else
@@ -183,10 +230,10 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   - Answering in the terminal turns the record into `Resolved in terminal` after 3 s.
   - Each answer is appended to `~/.config/herdr-app/decisions.md`.
 - **Keys on the board**:
-  - Moving: ↑↓/jk within a column, ←→/hl to the nearest column with cards keeping the row, 1–8 the first card of a stage.
+  - Moving: ↑↓/jk within a column, ←→/hl to the nearest column with cards keeping the row, 1–9 the first card of a stage.
   - Stages: S the stage picker, ⇧←/⇧→ the stage before/after, A archive/unarchive, ⌫ delete the worktree.
   - Agents: ⏎ go to the agent, Space peek (the agent in the focus block, following the selection, the keyboard stays),
-    F Focus (only worktrees that wait stay bright, the question's terminal gets the keyboard to type the answer).
+    F Focus (the side opens on who waits, and the question's terminal gets the keyboard to type the answer).
   - Answering: Y answer with the recommended option, R the Asks panel.
   - Making and shipping: N/C New agent, ⇧N an agent in this worktree, M merge or ship the PR, O open the PR.
   - Filtering: / search (name, branch, project, agents, question; ↓ or ⏎ back to the cards), V repo/all, P next project.
@@ -195,7 +242,7 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   ⌘W close the tab, or remove the worktree on its last tab; ⌘⇧A the Asks panel; ⌘⇧B the board. From any other layout,
   ⌘⇧B switches to this one.
 - Clicking a space in the sidebar's Spaces shows its terminal (in All scope); a click on an agent or worktree row goes
-  to its agent (agent.focus, pane.focus, the `work` child). The sidebar's agent order is what ⌘] / ⌘[ follow.
+  to its agent (hide `focus-term`, agent.focus, pane.focus, the `work` child). The sidebar's agent order is what ⌘] / ⌘[ follow.
   Right-click any worktree or agent row: the stage picker at the pointer.
 - **PRs: which come in.** Only open PRs of the org in `~/.config/herdr-app/prs.json` (`{"org": "acme", "team_repos":
   [{"repo": "web"}, {"repo": "monorepo", "codeowners": "payments"}]}`): yours (always), ones asking your review,
@@ -232,30 +279,35 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   - `body`: row, divider 1 `#1e1e20`. Its children:
     - `sidebar`: column, 220 px, min 44, max 480, background `chrome`, with `nav` (weight 3, part `nav`) over `spaces`
       (weight 1, the shipped `spaces` mod).
-    - `main`: stack, active `board`, with `board` (part `board`), `work` (`{tab: active}` with the pane frame above)
-      and `prs` (part `prs`).
+    - `main`: stack, active `board`, with `board` (part `board`), `work` (a column: `work-head`, 30 px, part
+      `agent-head` with `where: main`, over `work-tab`, `{tab: active}` with the pane frame above) and `prs` (part
+      `prs`).
     - `asks`: hidden, 380 px, min 300, max 720, part `asks`.
-    - `focus-term`: hidden, weight 0.5, min 360, max 1000, `{agent: focused}`.
+    - `focus-term`: a column, hidden, weight 0.5, min 360, max 1000: `focus-head`, 30 px, part `agent-head` with
+      `where: side`, over `focus-agent`, `{agent: focused}`.
     - `side`: hidden, 640 px, `{tab: active}`.
   - `bottom`: block, 24 px, part `bottom`.
 - `mods/board-herdr/` (`mod.json`: `{place: none}`):
-  - `main.js` draws every part from `props().part`: `top`, `nav`, `board`, `bottom`, `asks`, and the overlays `new`,
+  - `main.js` draws every part from `props().part`: `top`, `nav`, `board`, `bottom`, `asks`, `agent-head`, and the overlays `new`,
     `stage` and `cleanup`, which it opens itself with `openOverlay({mod: "board-herdr", props: {part, …}})`.
   - `asks.js`: `Answerer` delivers an answer (used by the board's cards); `AsksPanel` is the `asks` part.
   - `asks-engine.js`: the Asks detection; `asks-state.js`: the record and `asks.json`.
+  - `nav-order.js`: the order's rules and a worktree's main agent, pure, tested by `test/nav-order.test.mjs`.
   - `prs-rules.js`: the PRs view's rules, pure (no `herdr` import), tested by `node --test test/*.test.mjs` from the
     mod's folder: the searches, the GraphQL query, normalizing, CODEOWNERS, the columns and the count.
   - `prs-data.js`: `prs.json` and `PrsFeed`, which the `nav` copy ticks each second; `prs.js`: `PrsBoard` (part `prs`)
     and `PrsSettings` (the overlay `prs-settings`).
   - Art: `columns.svg`, `spinner.svg`, `asks.svg`, `ask-check|x|send|terminal.svg`; it also uses the shipped
-    `mods/workspace-chrome/spinner.svg` and `chevron-*.svg`; `prs.svg` for the PRs row.
+    `mods/workspace-chrome/spinner.svg` and `chevron-*.svg`; `prs.svg` for the PRs row; `machine.svg` for machines, `minimize.svg` for Minimize.
 - Copies: the `board` copy owns the keyboard (`cx.focus_handle()`, `on_key_down`), git, gh, Done and the cards; the
   `nav` copy runs the Asks engine and takes `board-herdr.*` key commands (`open-board`, `open-<stage>`, `new-agent`,
   `close`, `toggle`, `go-<address>`, `asks`, `asks-open`, `asks-recheck`, `prs`, `prs-settings`); the board copy takes `focus`, `unfocus`,
   `toggle`, `next/prev/left/right`, `peek`, `go`, `archive`, `delete`, `stage`, `add-agent`, `scope`, `stage-next`,
   `stage-prev`, `merge`, `yes`, `no`; the `asks` copy takes `asks-accept`.
 - Shared state (`shared`/`setShared`):
-  - Views: `boardh.view`, `boardh.left`, `boardh.focus`, `boardh.peek`, `boardh.col`, `boardh.refocus`, `boardh.stay`.
+  - Views: `boardh.view`, `boardh.left`, `boardh.focus`, `boardh.peek`, `boardh.shown` (the agent the side shows, for
+    its bar), `boardh.col`, `boardh.refocus`, `boardh.stay`.
+  - Order and filter: `boardh.order`, `boardh.machine`.
   - What the bars show: `boardh.counts`, `boardh.repos`, `boardh.scope`, `boardh.fold`, `boardh.used`.
   - New agent: `boardh.agent`, `boardh.newStage`, `boardh.pending`.
   - Worktrees: `boardh.spaceStages`, `boardh.stageAt`, `boardh.spaceTitles`.
@@ -264,7 +316,7 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
     `boardh.branches` (each worktree's branch, written by the board copy, for `⌁`).
 - `herdr` functions:
   - Data: `spaces`, `agents`, `terminals`, `panes`, `focused`, `layout`, `shared`/`setShared`, `props`, `window`,
-    `home`, `knownAgents`.
+    `home`, `knownAgents`, `machines`, `readTextFile`, `appHome`.
   - Acting: `run`, `exec`, `hc`, `notify`, `openOverlay`/`closeOverlay`, `nextCommand`, `setAgentOrder`.
 - Commands it runs:
   - Layout: `layout.select {stack: main, child}`, `layout.show/hide {id: focus-term | asks}`.
@@ -289,6 +341,9 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   "board-herdr.close", "cmd-shift-a": "board-herdr.asks", "cmd-shift-b": "board-herdr.open-board", "cmd-shift-g":
   "board-herdr.prs"}` and under `global`
   `"cmd-shift-b": "layout.switch:board-herdr"`.
+- `~/.config/herdr-app/board.json` is optional: `{"orchestrate": "<a folder in ~/.claude/skills>"}` names the
+  orchestrator skill New agent offers with a Linear issue (Claude Code starts on `/<skill> <your message>` and the
+  Context). Without it, or where the skill isn't installed, Orchestrate isn't offered.
 - `~/.config/herdr-app/asks.json` is optional (Asks' settings: `label`, `log`, `classify`, `model`, `trailing_questions`,
   `toast`, `debug`); the board's default `log` is `~/.config/herdr-app/decisions.md`.
 
@@ -300,8 +355,14 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   sets `boardh.refocus`, and the board grabs focus when it changes, except in Focus. Without this, arrows die after S
   then Esc.
 - **`min_w` inside a scroll container is ignored.** Columns get explicit widths computed from the columns row's
-  `on_size_change`. Only that row scrolls sideways; putting the numbers and chips inside it makes them scroll too. Use a
+  `on_size_change`. Only that row pans sideways; putting the numbers and chips inside it makes them pan too. Use a
   plain `div().flex().flex_row()` for the row: `h_flex` centers its children and shrinks each column to its header.
+- **`ScrollHandle` can't be read or set, only `scroll_to_item`.** The columns row pans itself: an `overflow_hidden`
+  box with the row inside at `absolute().left(-panX)`, the widths summed for its end, `on_scroll_wheel` for the
+  trackpad and Shift+wheel, and a press on the background (not on a card) for the drag.
+- **No drag and drop in gpui-kit.** Drags are `on_mouse_down` (start), `on_mouse_move` (fires only while the pointer is
+  over that element: each row or card says where it would land, from `local_position` against its `bounds`),
+  `on_mouse_up` on the container (it bubbles) to drop, and `on_hover(false)` on the container to cancel.
 - **Herdr's `task` is appended as the last argument.** Claude Code takes that; OpenCode reads its first positional as
   a project folder, so it gets `--prompt <task>` instead.
 - **`process.env` doesn't exist.** Read `LINEAR_API_KEY` with `sh -c 'printf %s "$LINEAR_API_KEY"'`, then through the
@@ -328,7 +389,7 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
 - Stages used to be a `herdr.stage` label on each agent's terminal; a space with no stage of its own reads its first
   agent's old label once.
 - `herdr-app shot` returns the last frame drawn; while Herdr is in the background it may be stale.
-- Limits: 4 agents listed per card, 6 options on a card, 60 Asks records kept 24 h, 6 Linear suggestions.
+- Limits: 4 agents listed per card, 60 Asks records kept 24 h, 6 Linear suggestions.
 - **PRs:** a page of 50 PRs of a busy repo with every field asked times out on GitHub (HTTP 502/504): team repos read
   20 a page, and a 5xx is tried once more. An org GitHub doesn't know answers with no PRs, not an error. Avatars are
   initials: `image()` only loads files from the app's folder. `ScrollHandle.new()` can't run while drawing: make every
@@ -344,10 +405,15 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
 - `herdr-app check mods/board-herdr` passes and `herdr-app status` shows `"layout": "board-herdr"` with no errors.
 - The board shows one column per stage, the cards of the shown repo's worktrees, and `V` (or the switch) shows every
   repo's.
-- `↓ ↑ ← →`, `1–8`, `S` (the picker) then `Esc`, then `↓` again moves the selection: the keyboard came back.
+- `↓ ↑ ← →`, `1–9`, `S` (the picker) then `Esc`, then `↓` again moves the selection: the keyboard came back.
 - `⇧→` on a card moves it to the next stage; the sidebar group and the stage button follow; after a reload it stays.
-- Opening the agent beside the board (Space) narrows the board: the columns scroll sideways, the numbers and chips
-  don't.
+- Opening the agent beside the board (a click on a card, or Space) narrows the board: the columns pan sideways by
+  dragging the background, the numbers and chips don't; another card's click shows its agent there. Minimize on its
+  bar closes it and the arrows move the selection again.
+- With the side open, a click on another agent in the sidebar shows it once, full screen, with the keyboard; Minimize
+  there brings the board back.
+- Dragging a card to another column changes its stage (the sidebar follows); dragging it above another card in its
+  column keeps that order after a reload, in the sidebar too.
 - New agent with a message on a repo space creates `~/.herdr/worktrees/<repo>/<branch>` on a new branch, a space there
   with the agent working on that message, in the chosen stage, titled from the message; running it again for the same
   branch reuses the worktree instead of failing.

@@ -3,24 +3,44 @@
 ![Board (Herdr)](preview.png)
 
 A layout for the [Herdr](https://herdr.dev) desktop app. Each git worktree you work in is a card on a Linear-style board,
-in a stage you choose: Todo, In progress, In review, Watch, Temp, Done, Archived, Paused. A card shows:
+in a stage you choose: Perpétuo (the agents you always keep open), Todo, In progress, In review, Watch, Temp, Done,
+Archived, Paused. Stages are labels you pick; only two act: Done removes the worktree after 3 days, and Archived puts
+its tabs away. A card shows:
 
 - every agent working in that worktree, and the sub-agents they started, counted by status;
 - its branch, commits, uncommitted lines, pull request and checks;
-- the question an agent is waiting on, with its options to click.
+- the question an agent is waiting on, with every option in full to click (its column widens to fit them);
+- the machine it is on, when that isn't this one: a tag with the machine's name, such as `devbox`, and
+  `devbox · offline` while Herdr can't reach it.
 
-The sidebar lists the worktrees by stage, most recently used first, with a link to each agent.
+The sidebar lists the worktrees by stage, each with its agents, in the order you drag them to. A click on a worktree
+goes to its main agent, not a sub-agent that agent started.
 
+- **Drag**: a card to another column changes its stage; within a column, it changes its place. Drag the board's
+  background to scroll it sideways, as in Linear.
+- **An agent beside the board**: a click on a card shows its agent's terminal at the right, and the board stays
+  whole and clickable, so another click shows another agent. The bar over an agent, beside the board or in its place,
+  has **Minimize**, which gives the board back the screen and the keyboard.
+- **Machines**: with Herdr's ssh machines, the board and the sidebar filter by machine, and New agent asks where the
+  agent runs.
 - **New agent** (⌘N) makes a worktree of the shown repo and starts Claude Code or OpenCode in it. The agent's first
   message is yours plus a Context block: a Linear issue (picked from your own when `LINEAR_API_KEY` is set), a pull
   request, a Slack message, any link or note. The card gets the issue's title, the branch gets Linear's branch name.
+- **Orchestrate** (optional): if you have a Claude Code skill that plans and runs work on a Linear issue, name its
+  folder in `~/.config/herdr-app/board.json` as `{ "orchestrate": "<folder in ~/.claude/skills>" }`. New agent with a
+  Linear issue then offers Orchestrate, on unless you untick it. It starts Claude Code in the new worktree on
+  `/<skill> <your message>`, followed by the Context block with the issue. What happens next is up to your skill;
+  any agents it starts in that space with `hc` (herdr-core, the command line that comes with Herdr) show on the card.
+  Without the file, or where the skill isn't installed, the option isn't shown.
 - **Asks** (⌘⇧A): every question your agents ask, answered from the card or the panel without opening the terminal.
   This covers permission prompts, menus of options and turns that end with a plain-text question. It is built on
   [herdr-agent-ask](https://github.com/sachin-philip/herdr-agent-ask).
-- **PRs** (⌘⇧G): the open pull requests that wait on you, as a kanban with two lanes.
-  - Other people's: Draft · Precisa da minha revisão · Precisa do meu time · Revisado, esperando o autor · Pronto para
-    merge.
-  - Yours: Draft: revisar para liberar · Draft: ideias · Comentários a resolver · Esperando review · Pronto para merge.
+- **PRs** (⌘⇧G): the open pull requests that wait on you, as a kanban with two lanes. The labels are in Portuguese
+  (English in brackets here):
+  - `PRs de outros` [other people's]: Draft · Precisa da minha revisão [needs my review] · Precisa do meu time [needs
+    my team] · Revisado, esperando o autor [reviewed, waiting on the author] · Pronto para merge [ready to merge].
+  - `Meus PRs` [mine]: Draft: revisar para liberar [draft to review and publish] · Draft: ideias [draft ideas] ·
+    Comentários a resolver [comments to resolve] · Esperando review [waiting for review] · Pronto para merge.
   - Each card has the author, checks, unresolved threads, age, ↗ to GitHub, and ⌁ to the agent whose worktree is on
     the PR's branch.
   - The gear sets your GitHub org and your team's repos (a whole repo, or only a CODEOWNERS team's folders). They are
@@ -32,7 +52,7 @@ The sidebar lists the worktrees by stage, most recently used first, with a link 
   - `leftover worktrees · clean up` lists the ones a closed space left behind.
   - A removal keeps the branch and its commits.
 - **Keyboard first**, like Linear:
-  - ↑↓←→ / hjkl to move, 1–8 to jump to a stage;
+  - ↑↓←→ / hjkl to move, 1–9 to jump to a stage;
   - S to change the stage, ⇧←→ to move it one stage;
   - ⏎ to open the agent, Space to peek at it, F for Focus;
   - Y to answer with the recommended option, R for the Asks panel;
@@ -65,6 +85,8 @@ By hand: copy `layouts/board-herdr.json` to `~/.config/herdr-app/layouts/` and `
 
 Mods are trusted code. This one:
 
+- runs `git` and `gh` on the machine a worktree is on: through `hc` for one of Herdr's ssh machines, as that
+  machine's login (a machine Herdr can't reach is skipped until it's back);
 - runs `git` in each worktree's folder: `status`, `rev-list` and `diff --shortstat`, plus
   `worktree add|list|remove|prune` from New agent, Done and the cleanup;
 - runs `gh` for each branch's pull request and checks, your PRs merged this week, and Merge PR / Ship PR

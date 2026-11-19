@@ -2,23 +2,26 @@
 // worktree mod makes one per checkout), so each card is a space: its stage, its repo and branch, every agent running in
 // it and the sub-agents those started (hc run), counted by status. One mod draws every part; the layout says which with
 // props().part: "top" (the pinned Board tab with its needs-you badge, then the shown space's tabs), "nav" (the top of
-// the sidebar: + New agent, Board, who needs you, then every worktree grouped by stage, most recently used first, its
-// agents under it; a click goes straight to an agent, a right-click moves the worktree to another stage), "board"
+// the sidebar: + New agent, Board, who needs you, then every worktree grouped by stage, in the order you drag them to,
+// its agents under it; a click goes to the worktree's main agent, not a sub-agent it started there, or straight to an
+// agent, a right-click moves the worktree to another stage), "board"
 // (today's numbers, the next move, project chips and one column per stage) and "bottom" (when the board last read, any
 // git or gh problem, the clock). "new" is the New agent dialog: a new worktree of the shown repo with the agent in it,
 // or one more agent in a worktree, started on your message plus a Context block of the references you add (a Linear
-// issue, picked from yours when LINEAR_API_KEY is set, a pull request, a Slack message, any link or note); "stage" is
+// issue, picked from yours when LINEAR_API_KEY is set, a pull request, a Slack message, any link or note); with a
+// Linear issue and an orchestrator skill (board.json's "orchestrate", installed), Orchestrate (on unless you untick it)
+// starts Claude Code on `/<skill> <your message>` and the Context, so its agents land in that worktree's space; "stage" is
 // the stage picker; "cleanup" lists the worktrees left without a space, to open or remove. ⌘W (keys.json,
 // board-herdr.close) on a worktree's last tab opens Herdr's own Remove worktree, so closed tasks don't pile up on disk. Both give the keyboard back to the board when they
 // close (Herdr only does that for focusable mods).
-// Two things kept apart: a worktree's stage (Todo, In progress, In review, Watch, Temp, Done, Archived, Paused), which
-// only you change, kept in shared state by space (Done removes the worktree after 3 days there, unless it has
+// Two things kept apart: a worktree's stage (Perpétuo, Todo, In progress, In review, Watch, Temp, Done, Archived, Paused), which
+// only you change (the stage picker, S, or dragging its card to another column), kept in shared state by space (Done removes the worktree after 3 days there, unless it has
 // uncommitted changes); and each agent's status (working, waiting for you, done, idle), which the
 // agent reports and the board only shows. A card suggests the next stage when its pull request says so (opened: In
 // review; merged: Archived) but never moves by itself. Archived also puts the worktree's tabs away (tab.settle).
 // The board and the sidebar show the worktrees of the shown space's repo, or every one (V on the board), and say when
 // an agent elsewhere needs you.
-// Keyboard, like Linear's: ↑↓/jk within a column, ←→/hl across columns, 1-8 a column, S the stage, ⇧←→ the stage
+// Keyboard, like Linear's: ↑↓/jk within a column, ←→/hl across columns, 1-9 a column, S the stage, ⇧←→ the stage
 // before or after, ⏎ opens the worktree's agent, Space peeks at it beside the board, N a new worktree, ⇧N one more agent
 // in this one, / searches, ? lists every key; ⌘E (keys.json, board-herdr.toggle) goes from an agent to the board and
 // back.
@@ -27,8 +30,11 @@
 // checks, and for what you merged this week. Merge PR runs `gh pr merge`, Ship PR runs `git push -u origin HEAD && gh
 // pr create --fill`, New agent runs `git worktree add` into ~/.herdr/worktrees/<repo>/<branch>, where Herdr's own
 // worktree mod puts them, and, only with LINEAR_API_KEY set in your shell, asks api.linear.app for your open issues.
-// Focus (F) fades everything but who needs you and shows the agent's live terminal in the layout's hidden
-// "focus-term" block, so the question can be answered in place.
+// A click on a card (or an agent on it) shows that agent's live terminal beside the board, in the layout's hidden
+// "focus-term" block; the board stays whole and clickable, so another click shows another agent (Esc or Space
+// closes it). Focus (F) opens the same block on who needs you, with the keyboard, so the question can be answered
+// in place. "agent-head" is the bar over an agent, beside the board or in its place: its Minimize gives the board back
+// the screen and the keyboard. Going to an agent's whole screen closes the side first, so one agent shows once.
 // Asks (github.com/sachin-philip/herdr-agent-ask, fitted here): the sidebar copy runs its engine (asks-engine.js), which
 // turns every question an agent asks (a permission, a menu of options, a turn that ends asking in plain text, read with
 // `claude -p` Haiku) into a record in shared("asks.state"). A card shows its worktree's question with the options to
@@ -39,15 +45,16 @@
 // column of where it stands (prs-rules.js). The sidebar's copy reads them with `gh api graphql` (prs-data.js), read only;
 // the gear ("prs-settings") edits prs.json's org and team repos. ⌁ on a card opens the worktree on the PR's branch.
 import { View, div, image, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, ScrollHandle, Popup } from "gpui-base";
 import { spaces, agents, panes, run, props, exec, shared, setShared, window, nextCommand, layout, openOverlay, closeOverlay,
-  knownAgents, home, focused, setAgentOrder, terminals, notify } from "herdr";
+  knownAgents, home, focused, setAgentOrder, terminals, notify, machines, readTextFile, appHome } from "herdr";
 import { Engine } from "./asks-engine.js";
 import { loadConfig } from "./asks-state.js";
 import { AsksPanel, Answerer, pickable, waitingAsks, questionsOf } from "./asks.js";
 import { PrsFeed, PRS, PR_ASK, PR_DRAFTS } from "./prs-data.js";
 import { PrsBoard, PrsSettings, PRS_SHOWN } from "./prs.js";
 import { lanes } from "./prs-rules.js";
+import { mainAgent, addNew, moveKey, toFront, byOrder, seq } from "./nav-order.js";
 
 const MOD = "board-herdr";
 const C = {
@@ -59,6 +66,7 @@ const C = {
 };
 // the stages a worktree goes through, in order: the board's columns and the sidebar's groups
 const STAGES = [
+  ["perpetual", "Perpétuo", "#c084fc"], // agents you always keep open: nothing nudges them out
   ["todo", "Todo", "#8a8f98"],
   ["in_progress", "In progress", "#e6b422"],
   ["in_review", "In review", "#3ec9b4"],
@@ -71,7 +79,7 @@ const STAGES = [
 const DONE_MS = 3 * 86400000; // how long a worktree stays in Done before it's removed
 const DEFAULT_STAGE = "in_progress"; // a worktree nobody gave a stage (Archived when all its tabs were put away)
 const OLD_STAGE_LABEL = "herdr.stage"; // where stages were before they belonged to worktrees: on each agent's terminal
-const stageInfo = (k) => STAGES.find(([s]) => s === k) ?? STAGES[1];
+const stageInfo = (k) => STAGES.find(([s]) => s === k) ?? STAGES[2];
 const CHIPS = [
   ["#e0707f", "#3b1d24"], ["#3ec9b4", "#11302d"], ["#f0a050", "#3a2410"], ["#a690e8", "#2a2245"],
   ["#e6c35c", "#352c10"], ["#6fb3f2", "#152a40"], ["#e88cc8", "#3a1a30"], ["#8fd18a", "#1c321c"],
@@ -80,6 +88,7 @@ const COL_MIN = 260; // px: the narrowest a column with cards gets; below that t
 const FOLDED_W = 140; // px: a folded column (just its header)
 const EMPTY_W = 118; // px: a column without cards
 const CARD_AGENTS = 4; // agents listed on a card; the rest are counted
+const ASK_MAX_W = 480; // px: the widest a column gets so a card's question options read on one line each (longer ones wrap)
 const MONO = "JetBrains Mono";
 const SANS = "Geist";
 const GIT_MS = 10000; // how often each worktree's folder is read with git (also when an agent changes status)
@@ -103,9 +112,12 @@ const NEW_AGENTS = [
   { key: "claude", name: "Claude Code", icon: "icons/claude.svg", tint: false, run: ["claude"], installed: null },
   { key: "opencode", name: "OpenCode", icon: "icons/opencode.svg", tint: true, run: ["opencode"], installed: null },
 ];
-const USED = "boardh.used"; // shared: address -> when you last left that agent (ms), the sidebar's order
+const USED = "boardh.used"; // shared: address -> when you last left that agent (ms), how recently a worktree was used
+const ORDER = "boardh.order"; // shared: the sidebar's order, space ids and agent addresses, as you dragged them
 const FOLD = "boardh.fold"; // shared: the sidebar's folded groups
 const SCOPE = "boardh.scope"; // shared: "all", or anything else for the shown space's repo
+const MACHINE = "boardh.machine"; // shared: the machine filter: null for every one, "" this computer, else a machine's name
+const SHOWN = "boardh.shown"; // shared: the agent the board last showed beside it, for the bar over it
 const PEEK = "boardh.peek"; // shared: Space shows the selected agent beside the board (the top bar then keeps the board)
 const COL = "boardh.col"; // shared: {kind, at}, the stage the sidebar last opened the board on (kind null: none)
 const REFOCUS = "boardh.refocus"; // shared: when a dialog over the board closed (ms): the board takes the keyboard back
@@ -300,10 +312,13 @@ function stageReader(list) {
   };
 }
 
-// moves a worktree to a stage; Archived puts its tabs away (they keep running and come back when they need you),
+// moves a worktree to a stage (at the top of it in the sidebar); Archived puts its tabs away (they keep running and come back when they need you),
 // leaving Archived brings them back
 function setStage(spaceId, stage) {
-  if ((shared(SPACE_STAGES) ?? {})[spaceId] !== stage) setShared(STAGE_AT, { ...(shared(STAGE_AT) ?? {}), [spaceId]: Date.now() });
+  if ((shared(SPACE_STAGES) ?? {})[spaceId] !== stage) {
+    setShared(STAGE_AT, { ...(shared(STAGE_AT) ?? {}), [spaceId]: Date.now() });
+    setShared(ORDER, toFront(shared(ORDER) ?? [], spaceId)); // it comes in at the top of the stage in the sidebar
+  }
   setShared(SPACE_STAGES, { ...(shared(SPACE_STAGES) ?? {}), [spaceId]: stage });
   for (const t of spaces().find((s) => s.id === spaceId)?.tabs ?? []) {
     if (stage === "archived" && !t.settled) run("tab.settle", { id: t.id });
@@ -312,9 +327,10 @@ function setStage(spaceId, stage) {
 }
 
 // every space as a worktree: its agents (the most urgent first, then the one used last), each with the sub-agents it
-// started, all of them counted, and its stage
+// started, all of them counted, its main agent (where a click on it goes) and its stage
 function worktrees() {
   const list = agents();
+  const parentOf = new Map(terminals().filter((t) => t.parent).map((t) => [t.address, t.parent]));
   const used = shared(USED) ?? {};
   const live = terminals().filter((t) => !t.state || t.state === "live");
   const byAddr = new Map(live.map((t) => [t.address, t]));
@@ -336,12 +352,14 @@ function worktrees() {
     const ags = list.filter((a) => a.space === s.id)
       .map((a) => ({ a, tab: tabs.get(a.tab), subs: subs.get(a.address) ?? [], at: used[a.address] ?? tabs.get(a.tab)?.changed_at ?? 0 }))
       .sort((x, y) => RANK[y.a.status] - RANK[x.a.status] || y.at - x.at);
+    const mainAt = mainAgent(ags.map((x) => x.a.address), parentOf);
+    const main = ags.find((x) => x.a.address === mainAt) ?? null;
     return {
-      key: s.id, space: s, agents: ags, subs: ags.flatMap((x) => x.subs), needs: ags.filter((x) => x.a.status === "blocked"),
+      key: s.id, space: s, agents: ags, main, subs: ags.flatMap((x) => x.subs), needs: ags.filter((x) => x.a.status === "blocked"),
       status: s.status, stage: stageOf(s),
       at: Math.max(0, ...ags.map((x) => x.at), ...s.tabs.map((t) => t.changed_at ?? 0)),
       // one you gave the space, else New agent's title, else what its agent says it's doing, else the branch
-      name: s.named ? s.name : titles[s.id] || shortTitle(agentTitle(ags[0]?.a) ?? "") || s.branch || s.name,
+      name: s.named ? s.name : titles[s.id] || shortTitle(agentTitle(main?.a) ?? "") || s.branch || s.name,
     };
   });
 }
@@ -350,10 +368,23 @@ function worktrees() {
 
 const activeSpace = () => spaces().find((s) => s.active) ?? null;
 const allSpaces = () => shared(SCOPE) === "all";
-// a space's repo (its git common dir, as the board last read it), or the space itself when it isn't in one
-const repoKey = (id) => (shared(REPOS) ?? {})[id]?.common ?? `space:${id}`;
-// whether the board and the sidebar show this space: the shown space's repo, or every one
-const inScope = (spaceId) => allSpaces() || repoKey(spaceId) === repoKey(activeSpace()?.id);
+// a space's repo by name (as the board last read it), so the same repo on two machines is one; or the space itself
+// when it isn't in one
+const repoKey = (id) => (shared(REPOS) ?? {})[id]?.name ?? `space:${id}`;
+// the machines with spaces, this computer (null) first; what one is called; the machine filter, when that machine is here
+const machineList = () => [...new Set(spaces().map((s) => s.machine ?? null))]
+  .sort((x, y) => (x === null ? -1 : y === null ? 1 : x.localeCompare(y)));
+const machineLabel = (m) => m ?? (window()?.platform === "macos" ? "This Mac" : "This computer");
+function machineFilter() {
+  const m = shared(MACHINE);
+  return m == null || !machineList().includes(m === "" ? null : m) ? null : m;
+}
+// whether the board and the sidebar show this space: on the machine picked (or any), and the shown space's repo (or every one)
+function inScope(spaceId) {
+  const m = machineFilter();
+  if (m !== null && (spaces().find((s) => s.id === spaceId)?.machine ?? "") !== m) return false;
+  return allSpaces() || repoKey(spaceId) === repoKey(activeSpace()?.id);
+}
 const scopeName = () => (shared(REPOS) ?? {})[activeSpace()?.id]?.name ?? activeSpace()?.name ?? "this repo";
 
 // the Asks panel at the board's right (the layout's hidden "asks" block): ⌘⇧A, R on the board, the sidebar's Asks row
@@ -389,12 +420,23 @@ function worktreeOn(repo, branch) {
   return (list.find((b) => b.project === repo) ?? (list.length === 1 ? list[0] : null))?.space ?? null;
 }
 
+// New agent with a Linear issue: Claude Code starts on your orchestrator skill (its defaults: no arguments), your
+// message and the issue, and the skill puts its agents in the new worktree's space, its own. The skill is yours to
+// name, in ~/.config/herdr-app/board.json ({ "orchestrate": "<skill folder in ~/.claude/skills>" }); without it, or
+// where the skill isn't installed, Orchestrate isn't offered
+async function orchestrateSkill() {
+  try {
+    const name = JSON.parse(await readTextFile(`${appHome()}/board.json`))?.orchestrate;
+    return typeof name === "string" && /^[\w.-]+$/.test(name) ? name : null;
+  } catch { return null; } // no board.json
+}
+
 // how to start an agent on a first message: Herdr's task puts it last on the command line, as Claude Code takes it;
 // OpenCode's first argument is a folder, so it gets --prompt
 const launch = (a, task) => (!task ? { argv: a.run } : a.key === "opencode" ? { argv: [...a.run, "--prompt", task] } : { argv: a.run, task });
 
 // New agent: a new worktree of the shown repo, or (space) one more agent in that worktree
-const newAgent = (space) => openOverlay({ mod: MOD, props: { part: "new", space: space ?? null }, kind: "dialog", width: 540, height: 720 });
+const newAgent = (space) => openOverlay({ mod: MOD, props: { part: "new", space: space ?? null }, kind: "dialog", width: 540, height: 770 });
 
 // the stage picker: at the pointer for a click, centered for a key
 function openStagePicker(space, title, stage, pointer) {
@@ -410,24 +452,44 @@ function deleteWorktree(spaceId) {
   if (s && isWorktree(s)) openOverlay({ mod: "worktree", kind: "dialog", width: 440, height: 260, props: { space: s.id, action: "remove" } });
 }
 
-// an agent's terminal, with the keyboard
-function goToAgent(address) {
-  if (shared(FOCUS)) { run("layout.hide", { id: "focus-term" }); setShared(FOCUS, false); }
-  run("agent.focus", { terminal: address });
-  run("pane.focus", { terminal: address });
+// Minimize on the bar over an agent: beside the board (Peek or Focus), the side closes; in the board's place, the board
+// comes back; either way the board takes the keyboard, so another card or agent is a click or a key away
+function minimize(side) {
+  if (side) { closeSide(); setShared(REFOCUS, Date.now()); } else openBoard(null);
+}
+
+// the agent beside the board (a card's click, Space or Focus) put away: going to an agent's whole screen closes it
+// first, or it would show that same agent next to it, and pane.focus (which prefers a visible layout block) would send
+// the keyboard there instead
+function closeSide() {
+  run("layout.hide", { id: "focus-term" });
+  if (shared(PEEK)) setShared(PEEK, false);
+  if (shared(FOCUS)) setShared(FOCUS, false);
+}
+
+// the shown space's terminals in the board's place, the whole screen
+function showWork() {
+  closeSide();
   run("layout.select", { stack: "main", child: "work" });
   setShared(LEFT, Date.now());
   setShared(VIEW, "work");
 }
 
-// a worktree: the agent that needs you, else the one used last; a worktree without agents shows its terminals
+// an agent's terminal, with the keyboard
+function goToAgent(address) {
+  closeSide();
+  run("agent.focus", { terminal: address });
+  setShared(SHOWN, address);
+  run("pane.focus", { terminal: address });
+  showWork();
+}
+
+// a worktree: its main agent (not a sub-agent it started there); a worktree without agents shows its terminals
 function goToWorktree(w) {
-  if (w.agents[0]) { goToAgent(w.agents[0].a.address); return; }
-  if (shared(FOCUS)) { run("layout.hide", { id: "focus-term" }); setShared(FOCUS, false); }
+  if (w.main) { goToAgent(w.main.a.address); return; }
+  closeSide();
   run("space.select", { id: w.key });
-  run("layout.select", { stack: "main", child: "work" });
-  setShared(LEFT, Date.now());
-  setShared(VIEW, "work");
+  showWork();
 }
 
 // This repo / All, for the board and the sidebar
@@ -450,10 +512,36 @@ function scopeSwitch(id, wide) {
 function elsewhere(id, n, size) {
   return h_flex().id(id).flex_none().gap(5).px(7).py(2).rounded(5).items_center().cursor_pointer()
     .bg(C.youBg).border(1).border_color(C.youLine).hover((st) => st.opacity(0.85))
-    .on_click((_e, cx) => { cx.stop_propagation(); setShared(SCOPE, "all"); })
+    .on_click((_e, cx) => { cx.stop_propagation(); setShared(SCOPE, "all"); setShared(MACHINE, null); })
     .child(div().w(6).h(6).rounded(3).bg(C.you))
     .child(div().font_family(SANS).text_size(size).text_color(C.you).child(`${n} elsewhere`));
 }
+
+// All / each machine, for the board and the sidebar: only when spaces are on more than one machine
+function machineSwitch(id, wide) {
+  const list = machineList();
+  if (list.length < 2) return null;
+  const cur = machineFilter();
+  const seg = (key, on, label, value) => h_flex().id(`${id}-${key}`).h(wide ? 26 : 24).px(wide ? 6 : 9).gap(5).items_center()
+    .when(wide, (el) => el.flex_1().min_w(0).justify_center()).flex_none().rounded(5).cursor_pointer()
+    .bg(on ? C.raised : "#00000000").hover((st) => st.bg(on ? C.raised : C.hover))
+    .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+    .on_click(() => setShared(MACHINE, value))
+    .children(key === "all" ? [] : [icon("machine", 11, on ? C.text : C.dim)])
+    .child(div().min_w(0).truncate().font_family(SANS).text_size(12).text_color(on ? C.text : C.muted).child(label));
+  return h_flex().id(id).flex_none().p(2).gap(2).rounded(7).border(1).border_color(C.line2).bg(C.main)
+    .when(wide, (el) => el.w_full())
+    .child(seg("all", cur === null, "All machines", null))
+    .children(list.map((m) => seg(`m-${m ?? "local"}`, cur === (m ?? ""), machineLabel(m), m ?? "")));
+}
+
+// the machine a space on another computer is on, beside its name
+// ("offline" while Herdr can't reach it)
+const machineTag = (m) => {
+  const down = (shared(COUNTS)?.offline ?? []).includes(m);
+  return h_flex().flex_none().h(16).px(5).gap(3).items_center().rounded(4).border(1).border_color(C.line2)
+    .bg(C.raised).child(mono(10, down ? C.dim : C.muted, down ? `${m} · offline` : m));
+};
 
 // what an agent itself is doing, as an icon: working, waiting for you, done (finished while you weren't looking), idle
 function statusIcon(status, size) {
@@ -530,6 +618,7 @@ export default class Board extends View {
     this.offGithub = new Set(); // repos (git common dir) whose remotes aren't on GitHub
     this.merged = []; // closedAt (ms) of my pull requests merged in the last 7 days
     this.problem = null; // the last git or gh error
+    this.offline = []; // the machines Herdr couldn't reach on the last read
     this.reading = false;
     this.lastRead = 0;
     this.sig = null; // the agents' statuses and the spaces' folders, to read again when one changes
@@ -541,7 +630,8 @@ export default class Board extends View {
     this.peek = false; // Space: the selected worktree's agent beside the board, following the selection
     this.help = false; // ?: every key
     this.scroll = STAGES.map(() => ScrollHandle.new()); // each column's list, to keep the selected card in view
-    this.hscroll = ScrollHandle.new(); // the columns, sideways, to keep the selected column in view
+    this.panX = 0; // how far the columns are scrolled sideways (px): a drag on the background, the wheel, the trackpad
+    this.pan = null; // a drag on the background: {x, from, moved}
     this.folded = new Set(["archived"]); // columns drawn as just their header
     this.refocusAt = shared(REFOCUS) ?? 0;
     this.query = ""; // /: cards whose name, branch, project, agents or question have it
@@ -604,11 +694,16 @@ export default class Board extends View {
         const where = new Map();
         for (const s of spaces()) { const d = place(s, paneList); if (d) where.set(d, s.machine ?? null); }
         let problem = null;
+        // a machine Herdr can't reach is a state, not an error to fix here: no git or gh there this round (each try
+        // waits out its timeout), and its cards keep what was last read
+        const down = new Set(machines().filter((m) => m.name && m.layout === "unavailable").map((m) => m.name));
+        const cut = (on, e) => on && /unreachable|cannot reach/i.test(String(e?.message ?? e)) && down.add(on);
         for (const [dir, on] of where) {
+          if (on && down.has(on)) continue;
           try {
             const r = await exec("sh", ["-c", GIT, "sh", dir], { on });
             this.git[dir] = r.code === 0 ? parseGit(r.stdout) : null;
-          } catch (e) { problem = `git: ${String(e.message ?? e)}`; }
+          } catch (e) { if (!cut(on, e)) problem = `git${on ? ` on ${on}` : ""}: ${String(e.message ?? e)}`; }
         }
         this.share();
         cx.notify();
@@ -631,6 +726,7 @@ export default class Board extends View {
           if (g?.branch && g.branch !== g.base) branches.set(`${g.common}|${g.branch}`, { g, on });
         }
         for (const [key, { g, on }] of branches) {
+          if (on && down.has(on)) continue;
           if (!force && this.prs[key] !== undefined && Date.now() - (this.prAt[key] ?? 0) < GH_MS) continue;
           this.prAt[key] = Date.now();
           try {
@@ -641,10 +737,12 @@ export default class Board extends View {
             } else if (/no pull requests found/i.test(r.stderr ?? "")) this.prs[key] = null;
             // a repo whose remotes aren't on GitHub: no pull requests to look for, and nothing to ship
             else if (/known GitHub host|no git remotes/i.test(r.stderr ?? "")) { this.prs[key] = null; this.offGithub.add(g.common); }
-            else problem = `gh: ${lastLine(r.stderr)}`;
-          } catch (e) { problem = `gh: ${String(e.message ?? e)}`; }
+            // which machine's gh said it: another machine's login may not reach a repo this one does
+            else problem = `gh${on ? ` on ${on}` : ""}: ${lastLine(r.stderr)}`;
+          } catch (e) { if (!cut(on, e)) problem = `gh${on ? ` on ${on}` : ""}: ${String(e.message ?? e)}`; }
         }
         this.problem = problem;
+        this.offline = [...down].sort();
       } finally {
         this.reading = false;
         this.lastRead = Date.now();
@@ -672,7 +770,7 @@ export default class Board extends View {
   share() {
     const cards = this.cards;
     const counts = { tasks: cards.filter((t) => t.stage !== "archived").length, needs: cards.reduce((n, t) => n + t.needs.length, 0),
-      when: new Date().toTimeString().slice(0, 5), problem: this.problem };
+      when: new Date().toTimeString().slice(0, 5), problem: this.problem, offline: this.offline };
     if (JSON.stringify(counts) !== JSON.stringify(shared(COUNTS) ?? {})) setShared(COUNTS, counts);
     const repos = Object.fromEntries(cards.filter((t) => t.git).map((t) => [t.key, { common: t.git.common, name: t.git.project }]));
     if (JSON.stringify(repos) !== JSON.stringify(shared(REPOS) ?? {})) setShared(REPOS, repos);
@@ -786,32 +884,46 @@ export default class Board extends View {
   // a nudge, never a move: an open pull request on a card still in Todo or In progress, or a merged one not archived
   nudge(t) {
     if (t.pr?.state === "OPEN" && (t.stage === "todo" || t.stage === "in_progress")) return "in_review";
-    if (t.pr?.state === "MERGED" && t.stage !== "archived") return "archived";
+    if (t.pr?.state === "MERGED" && t.stage !== "archived" && t.stage !== "perpetual") return "archived";
     return null;
   }
 
   // ---- moving around ------------------------------------------------------------------------------------------
 
-  // the cards the board shows, column by column: the repo, project and search filters (and with only, Focus's: just
-  // the worktrees where an agent waits for you)
-  columns(only) {
+  // the cards the board shows, column by column: the repo, project and search filters, in your order
+  columns() {
     const q = this.query.trim().toLowerCase();
     const hit = (t) => !q || [t.name, t.branch, t.project, t.space.name, ...t.agents.map((x) => cleanTitle(x.a.title)),
       ...t.needs.map((x) => this.asks[x.a.address])].some((v) => String(v ?? "").toLowerCase().includes(q));
     const shown = this.cards.filter((t) => inScope(t.key) && (!this.filter || t.project === this.filter) && hit(t));
-    return STAGES.map(([k]) => shown.filter((t) => t.stage === k && (!only || !this.focus || t.needs.length)));
+    // in the order you dragged them to, the same as the sidebar's
+    const order = shared(ORDER) ?? [];
+    return STAGES.map(([k]) => byOrder(shown.filter((t) => t.stage === k), (t) => t.key, order));
   }
 
   // what the keys move through: folded columns count as empty
-  navCols() { return this.columns(true).map((l, i) => (this.folded.has(STAGES[i][0]) ? [] : l)); }
+  navCols() { return this.columns().map((l, i) => (this.folded.has(STAGES[i][0]) ? [] : l)); }
 
   visible() { return this.navCols().flat(); }
 
-  pick(cx, key) {
+  // selects a card; a click (open) also shows its agent beside the board, and while the side is open it follows the
+  // selection: in Focus the one waiting for you (else the main one) with the keyboard, else the main one
+  pick(cx, key, open) {
     this.sel = key;
     const t = this.cards.find((x) => x.key === key);
-    if (this.focus && t?.needs.length) this.answerIn(t.needs[0].a.address);
-    else if (this.peek && t?.agents[0]) this.show(cx, t.agents[0].a.address);
+    const x = this.focus ? t?.needs[0] ?? t?.main : t?.main;
+    if (x && (open || this.focus || this.peek)) this.peekAt(cx, x.a.address);
+    cx.notify();
+  }
+
+  // one agent beside the board (the side opens if it's closed); the board stays shown, its cards still clickable
+  peekAt(cx, address) {
+    if (!this.focus && !this.peek) {
+      this.peek = true;
+      setShared(PEEK, true);
+      run("layout.show", { id: "focus-term" });
+    }
+    if (this.focus) this.answerIn(address); else this.show(cx, address);
     cx.notify();
   }
 
@@ -823,6 +935,7 @@ export default class Board extends View {
   // an agent in the focus-term block, the keyboard staying on the board
   show(cx, address) {
     run("agent.focus", { terminal: address });
+    setShared(SHOWN, address);
     this.grab(cx);
   }
 
@@ -830,6 +943,7 @@ export default class Board extends View {
   // terminal block showing the address), so typing answers it
   answerIn(address) {
     run("agent.focus", { terminal: address });
+    setShared(SHOWN, address);
     run("pane.focus", { terminal: address });
   }
 
@@ -852,12 +966,25 @@ export default class Board extends View {
   }
 
   select(cx, cols, c, r) {
-    this.hscroll.scroll_to_item(c);
+    this.reveal(c);
     this.scroll[c].scroll_to_item(r);
     this.pick(cx, cols[c][r].key);
   }
 
-  // 1-8: that column's first card (unfolding it)
+  // scrolls the columns sideways so column c shows whole
+  reveal(c) {
+    const x = this.colX?.[c], w = this.colWs?.[c], view = this.colsW ?? 0;
+    if (x == null) return;
+    if (x < this.panX) this.panX = x;
+    else if (x + w > this.panX + view) this.panX = Math.min(this.panMax ?? 0, x + w - view);
+  }
+
+  panTo(cx, x) {
+    const to = Math.max(0, Math.min(this.panMax ?? 0, x));
+    if (to !== this.panX) { this.panX = to; cx.notify(); }
+  }
+
+  // 1-9: that column's first card (unfolding it)
   toColumn(cx, c) {
     if (!STAGES[c]) return;
     this.folded.delete(STAGES[c][0]);
@@ -901,8 +1028,25 @@ export default class Board extends View {
     const t = this.cards.find((x) => x.key === this.sel);
     if (on) {
       run("layout.show", { id: "focus-term" });
-      if (t?.agents[0]) this.show(cx, t.agents[0].a.address);
+      if (t?.main) this.show(cx, t.main.a.address);
     } else run("layout.hide", { id: "focus-term" });
+    cx.notify();
+  }
+
+  // a card dragged onto another column: that stage (as the stage picker would set it), the card stays selected;
+  // a card dropped by another one goes above or below it; in an empty part of another column, at its end
+  dropCard(cx) {
+    const key = this.dragCard, to = this.dropCol, near = this.dropNear;
+    this.dragCard = null; this.dropCol = null; this.dropNear = null;
+    if (!key || (!to && !near)) return;
+    const end = !near && to ? this.columns()[STAGES.findIndex(([k]) => k === to)].filter((t) => t.key !== key).pop() : null;
+    if (to) setStage(key, to);
+    const place = near ?? (end ? { key: end.key, after: true } : null);
+    if (place) {
+      const known = new Set([...spaces().map((s) => s.id), ...agents().map((a) => a.address)]);
+      setShared(ORDER, moveKey((shared(ORDER) ?? []).filter((k) => known.has(k)), key, place.key, place.after));
+    }
+    this.sel = key;
     cx.notify();
   }
 
@@ -1013,9 +1157,10 @@ export default class Board extends View {
   // ?: every key, over the board's corner
   keyList() {
     const KEYS = [
-      ["↑ ↓  j k", "move within a column"], ["← →  h l", "move across columns"], ["1 – 8", "first card of a stage"],
-      ["S", "change the stage"], ["⇧← ⇧→", "stage before / after"], ["A", "archive / unarchive"], ["⌫", "delete the worktree"],
-      ["⏎", "open the worktree's agent"], ["Space", "peek at it"], ["F", "Focus: answer what needs you"],
+      ["↑ ↓  j k", "move within a column"], ["← →  h l", "move across columns"], ["1 – 9", "first card of a stage"],
+      ["S  drag", "change the stage, or the order"], ["⇧← ⇧→", "stage before / after"], ["A", "archive / unarchive"], ["⌫", "delete the worktree"],
+      ["Click", "its agent beside the board"], ["⏎  double-click", "open the worktree's agent"], ["Space", "show / hide the side"],
+      ["F", "Focus: answer what needs you"],
       ["Y", "answer with the recommended option"], ["R  ⌘⇧A", "Asks: every question, to answer"],
       ["N  C", "new agent, in a new worktree"], ["⇧N", "one more agent in this worktree"],
       ["M", "merge or ship the PR"], ["O", "open the PR in the browser"],
@@ -1036,6 +1181,7 @@ export default class Board extends View {
 
   render(cx) {
     if (this.part === "top") return this.top();
+    if (this.part === "agent-head") return this.agentHead();
     if (this.part === "bottom") return this.bottom();
     if (this.part === "nav") return this.nav();
     if (this.part === "asks") return this.asksUi.render(cx);
@@ -1110,7 +1256,7 @@ export default class Board extends View {
       .child(statusIcon(s, size - 4)).child(mono(size, s === "blocked" ? C.you : s === "working" ? C.work : s === "done" ? C.land : C.muted, `${n} ${WORD[s]}`)));
   }
 
-  // one agent on a card: a click goes to it
+  // one agent on a card: a click shows it beside the board, a double-click goes to it
   agentLine(t, x) {
     const a = x.a, tab = x.tab, now = this.now;
     const age = a.status === "blocked" ? (tab?.changed_at ? dur(now - tab.changed_at) : "")
@@ -1118,7 +1264,12 @@ export default class Board extends View {
     const subs = tally(x.subs.map(subStatus));
     return h_flex().id(`cl-${a.address}`).w_full().h(24).px(4).gap(7).items_center().rounded(4).cursor_pointer()
       .hover((st) => st.bg(C.raised))
-      .on_click((_e, cx) => { cx.stop_propagation(); this.goTo(cx, t, a.address); })
+      .on_click((e, cx) => {
+        cx.stop_propagation();
+        if (e.click_count === 2) { this.goTo(cx, t, a.address); return; }
+        this.sel = t.key;
+        this.peekAt(cx, a.address);
+      })
       .child(div().w(12).flex_none().flex().justify_center().child(statusIcon(a.status, 7)))
       .child(this.glyph(a))
       .child(div().flex_1().min_w(0).truncate().font_family(SANS).text_size(12)
@@ -1188,15 +1339,26 @@ export default class Board extends View {
     }
 
     // a flex row (stretching, unlike h_flex) so the status bar on the left runs the card's full height
-    return div().id(`card-${t.key}`).w_full().flex_none().flex().flex_row().rounded(6).overflow_hidden()
+    const near = this.dropNear?.key === t.key ? this.dropNear : null;
+    return div().id(`card-${t.key}`).relative().w_full().flex_none().flex().flex_row().rounded(6).overflow_hidden()
       .bg(asking ? C.youCard : C.card).border(1).border_color(sel ? C.accent : C.line)
       .cursor_pointer().hover((s) => s.bg(C.hover))
-      .when(this.focus && !asking, (el) => el.opacity(0.18))
-      .on_click((_e, cx) => this.pick(cx, t.key))
+      // a click shows its agent beside the board, a double-click goes to it; a drag to another column moves its stage
+      // a drag over another card lands above or below it (a line shows where), in its column
+      .on_mouse_down("left", () => { this.dragCard = t.key; this.dropCol = null; this.dropNear = null; })
+      .on_mouse_move((e, cx) => {
+        if (!this.dragCard) return;
+        const n = t.key === this.dragCard ? null : { key: t.key, after: e.local_position.y > e.bounds.height / 2 };
+        if (JSON.stringify(n) !== JSON.stringify(this.dropNear)) { this.dropNear = n; cx.notify(); }
+      })
+      .on_hover((on, cx) => { if (!on && this.dropNear?.key === t.key) { this.dropNear = null; cx.notify(); } })
+      .when(this.dragCard === t.key && Boolean(this.dropCol || this.dropNear), (el) => el.opacity(0.45))
+      .on_click((e, cx) => (e.click_count === 2 ? this.goTo(cx, t) : this.pick(cx, t.key, true)))
       .child(div().w(3).flex_none().bg(statusColor(t.status)))
       .child(v_flex().flex_1().min_w(0).px(11).py(9).gap(5)
       .child(h_flex().w_full().gap(6).items_center()
         .child(chip(t.project))
+        .when(!!t.machine, (el) => el.child(machineTag(t.machine)))
         .child(div().flex_1().min_w(0).truncate().font_family(MONO).text_size(11).text_color(C.dim).child(t.branch ?? ""))
         .child(this.stageButton(t)))
       .child(div().font_family(SANS).text_size(14).font_weight(600).text_color(C.text).child(t.name))
@@ -1213,7 +1375,9 @@ export default class Board extends View {
         .child(mono(10, C.you, "ASKS YOU"))
         .child(div().font_family(SANS).text_size(12).text_color(C.soft).child(ask || "the agent is waiting for you"))))
       .when(facts.length > 0, (el) => el.child(h_flex().flex_wrap().gap(10).children(facts.map(([s, c]) => mono(11, c, s)))))
-      .children(actions ? [actions] : []));
+      .children(actions ? [actions] : []))
+      .when(Boolean(near), (el) => el.child(div().absolute().left(0).right(0).h(3).bg(C.accent)
+        .when(!near.after, (l) => l.top(0)).when(near.after, (l) => l.bottom(0))));
   }
 
   // Y: the selected worktree's question and the option its agent recommends (Yes, for a permission), if it has one
@@ -1237,14 +1401,17 @@ export default class Board extends View {
         .when(more > 0, (el) => el.child(mono(10, C.you, `+${more} more`))))
       .child(div().font_family(SANS).text_size(12).text_color(C.soft)
         .child(q.question || (q.enriched ? "the agent is waiting for you" : "reading the question…")))
-      .when(pickable(q) && many < 2, (el) => el.child(v_flex().w_full().gap(3).children(q.options.slice(0, 6).map((o, i) =>
-        h_flex().id(`ao-${t.key}-${o.n}`).w_full().h(24).px(6).gap(7).items_center().rounded(4)
+      // every option whole: a long one wraps, its detail (when the agent gave one) under it
+      .when(pickable(q) && many < 2, (el) => el.child(v_flex().w_full().gap(3).children(q.options.map((o, i) =>
+        h_flex().id(`ao-${t.key}-${o.n}`).w_full().min_h(24).px(6).py(4).gap(7).items_start().rounded(4)
           .border(1).border_color(rec(i) ? C.accentDim : C.line2).bg(C.card)
           .cursor_pointer().hover((s) => s.bg(C.hover).border_color(C.accent))
           .on_click((_e, cx) => { cx.stop_propagation(); this.answerer.answer(q, o, cx); })
-          .child(mono(10, C.muted, String(o.n)))
-          .child(div().flex_1().min_w(0).truncate().font_family(SANS).text_size(12).text_color(C.text).tooltip(o.label).child(o.label.replace(/\s*\(recommended\)\s*$/i, "")))
-          .when(rec(i), (el) => el.child(mono(10, C.accent, sel ? "recommended · Y" : "recommended")))))))
+          .child(div().pt(1).flex_none().child(mono(10, C.muted, String(o.n))))
+          .child(v_flex().flex_1().min_w(0).gap(1)
+            .child(div().font_family(SANS).text_size(12).text_color(C.text).child(o.label.replace(/\s*\(recommended\)\s*$/i, "")))
+            .when(Boolean(o.detail), (el) => el.child(div().font_family(SANS).text_size(11).text_color(C.muted).child(o.detail)))
+            .when(rec(i), (el) => el.child(mono(10, C.accent, sel ? "recommended · Y" : "recommended"))))))))
       .when(!q.form && many > 1, (el) => el.child(mono(10, C.dim, `${many} questions: answer them in Asks (R)`)))
       .when(Boolean(q.form) && !sending, (el) => el.child(mono(10, C.dim, q.form.length > 1
         ? `${q.form.length} questions in one form: answer them in Asks (R)` : "takes several answers: pick them in Asks (R)")))
@@ -1274,7 +1441,6 @@ export default class Board extends View {
     const week = this.week();
     const maxW = Math.max(1, ...week);
     const openPrs = new Set(cards.filter((t) => t.pr?.state === "OPEN").map((t) => t.pr.url)).size;
-    const dimmed = (el) => el.when(this.focus, (e) => e.opacity(0.18));
     const ags = cards.flatMap((t) => t.agents);
     const subs = cards.flatMap((t) => t.subs);
     // the oldest question
@@ -1282,9 +1448,10 @@ export default class Board extends View {
     const next = asked.sort((p, q) => (p.x.tab?.changed_at ?? 0) - (q.x.tab?.changed_at ?? 0))[0];
     const projects = [...new Set(cards.map((t) => t.project))].sort();
     // the leftover worktrees of the repos shown
-    const leftover = this.orphans.filter((o) => allSpaces() || o.common === repoKey(activeSpace()?.id));
+    const leftover = (machineFilter() ?? "") !== "" ? [] // they're this computer's
+      : this.orphans.filter((o) => allSpaces() || o.repo === repoKey(activeSpace()?.id));
 
-    const strip = dimmed(div().w_full().flex_none().flex().flex_row().gap(10)
+    const strip = (div().w_full().flex_none().flex().flex_row().gap(10)
       .child(this.stat("LANDED TODAY", String(week[6]), C.land,
         h_flex().h(22).mt(4).gap(4).items_end().children(week.map((n, i) =>
           div().flex_1().h(Math.max(2, Math.round(20 * n / maxW))).rounded(2).bg(C.land).opacity(i === 6 ? 1 : 0.3))), true))
@@ -1308,9 +1475,10 @@ export default class Board extends View {
 
     const chips = h_flex().w_full().flex_none().flex_wrap().gap(6).items_center()
       .child(scopeSwitch("scope", false))
+      .children([machineSwitch("machine", false)].filter(Boolean))
       .when(away > 0, (el) => el.child(elsewhere("away", away, 12)))
       .child(div().w(1).h(16).mx(4).bg(C.line2))
-      .child(dimmed(h_flex().gap(6).items_center()
+      .child((h_flex().gap(6).items_center()
         .child(this.filterChip(null, "all", cards.length))
         .children(projects.map((p) => this.filterChip(p, p, cards.filter((t) => t.project === p).length,
           cards.some((t) => t.project === p && t.needs.length))))))
@@ -1323,14 +1491,13 @@ export default class Board extends View {
         .child(mono(11, C.dim, "/"))
         .child(Input.new(this.search).flex_1().min_w(0).h(24).font_family(SANS).text_size(12).text_color(C.text)))
       .child(mono(11, C.dim, this.focus ? "type in the terminal to answer · ⌘E back to the board"
-        : this.peek ? "space closes the peek · ⏎ opens it" : "S stage · ? keys"))
+        : this.peek ? "click a card to see its agent · esc closes the side · ⏎ opens it" : "S stage · ? keys"))
       .child(this.btn("new-agent", "+ New agent  N", "new", () => newAgent()))
       .child(this.btn("focus", "◎ Focus  F", this.focus ? "on" : "plain", (cx) => this.setFocus(cx, !this.focus)));
 
     const column = ([k, label, color], i) => {
       const list = by(k);
       const folded = this.folded.has(k);
-      const compact = folded || !list.length;
       const hot = this.col === k;
       const head = h_flex().id(`head-${k}`).w_full().h(22).flex_none().gap(7).items_center().cursor_pointer()
         .on_click((_e, cx) => { if (folded) this.folded.delete(k); else this.folded.add(k); cx.notify(); })
@@ -1338,9 +1505,18 @@ export default class Board extends View {
         .child(div().w(8).h(8).flex_none().rounded(4).bg(color))
         .child(div().min_w(0).truncate().child(mono(11, hot ? color : list.length ? C.soft : C.dim, label.toUpperCase())))
         .child(div().flex_none().px(5).rounded(8).bg(C.raised).font_family(MONO).text_size(10).text_color(C.muted).child(String(list.length)));
+      const drop = this.dropCol === k;
       return v_flex().id(`col-${k}`).min_h(0).gap(8).p(6).rounded(8).border(1)
-        .flex_none().w(compact ? (folded ? FOLDED_W : EMPTY_W) : colW)
-        .border_color(hot ? `${color}66` : "#00000000").bg(hot ? `${color}0d` : "#00000000")
+        .flex_none().w(widths[i])
+        .border_color(drop ? color : hot ? `${color}66` : "#00000000").bg(drop ? `${color}1a` : hot ? `${color}0d` : "#00000000")
+        // a card dragged over another column lands there on release
+        .on_mouse_move((_e, cx) => {
+          if (!this.dragCard) return;
+          const from = this.cards.find((x) => x.key === this.dragCard)?.stage;
+          const to = from && from !== k ? k : null;
+          if (to !== this.dropCol) { this.dropCol = to; cx.notify(); }
+        })
+        .on_mouse_up("left", (_e, cx) => this.dropCard(cx))
         .child(head)
         .when(!folded, (el) => el.child(v_flex().id(`list-${k}`).w_full().flex_1().min_h(0).gap(8).overflow_y_scrollbar().track_scroll(this.scroll[i])
           .children(list.map((t) => this.card(t)))));
@@ -1352,17 +1528,57 @@ export default class Board extends View {
       w + (this.folded.has(k) ? FOLDED_W : by(k).length ? 0 : EMPTY_W), 0);
     const open = STAGES.filter(([k]) => !this.folded.has(k) && by(k).length).length;
     const colW = Math.max(COL_MIN, Math.floor(((this.colsW ?? 0) - fixed) / Math.max(1, open)));
+    // the columns scroll sideways by hand (a drag on the background, as Linear does, or the wheel): where each starts
+    // a column whose card asks a question widens to fit its options (up to ASK_MAX_W; the columns then scroll sideways)
+    const askW = (t) => {
+      const q = asksIn(t)[0];
+      if (!q) return 0;
+      const longest = Math.max(0, ...(pickable(q) ? q.options : []).map((o) => o.label.length), (q.question ?? "").length / 3);
+      return Math.min(ASK_MAX_W, Math.round(longest * 6.6 + 100));
+    };
+    const widths = STAGES.map(([k]) => (this.folded.has(k) ? FOLDED_W : by(k).length ? Math.max(colW, ...by(k).map(askW)) : EMPTY_W));
+    this.colWs = widths;
+    this.colX = widths.map((_w, i) => widths.slice(0, i).reduce((a, b) => a + b, 0) + 12 * i);
+    const contentW = widths.reduce((a, b) => a + b, 0) + 12 * (STAGES.length - 1), view = this.colsW ?? 0;
+    this.panMax = Math.max(0, contentW - view);
+    this.panX = Math.min(this.panX, this.panMax);
     return v_flex().id("board").relative().size_full().bg(C.main).px(16).pt(14).pb(10).gap(12)
       .track_focus(this.h).on_key_down((e, cx) => this.key(e, cx))
       .on_mouse_down("left", () => this.h.focus())
       .child(strip)
       .children(banner ? [banner] : [])
       .when(!!this.problem, (el) => el.child(mono(11, C.red, this.problem)))
+      .when(this.offline.length > 0, (el) => el.child(mono(11, C.muted, `${this.offline.join(", ")} offline · its cards show the last read`)))
       .child(chips)
-      // a plain flex row: h_flex centres its children, which would shrink each column to its header
-      .child(div().id("cols").w_full().flex_1().min_h(0).flex().flex_row().gap(12).overflow_x_scrollbar().track_scroll(this.hscroll)
+      .child(div().id("cols").relative().w_full().flex_1().min_h(0).overflow_hidden()
         .on_size_change((size, cx) => { if (size.width !== this.colsW) { this.colsW = size.width; cx.notify(); } })
-        .children(STAGES.map(column)))
+        // sideways: a trackpad's or a tilted wheel's horizontal scroll, or the wheel with Shift
+        .on_scroll_wheel((e, cx) => {
+          const dx = Math.abs(e.delta.x) > Math.abs(e.delta.y) ? e.delta.x : e.modifiers.shift ? e.delta.y : 0;
+          if (dx) this.panTo(cx, this.panX - dx);
+        })
+        // a press on the background (not on a card, which drags the card) drags the columns sideways
+        .on_mouse_down("left", (e) => { if (!this.dragCard) this.pan = { x: e.position.x, from: this.panX, moved: false }; })
+        .on_mouse_move((e, cx) => {
+          if (!this.pan) return;
+          const d = e.position.x - this.pan.x;
+          if (!this.pan.moved && Math.abs(d) < 4) return; // a click stays a click
+          if (!this.pan.moved) { this.pan.moved = true; cx.notify(); }
+          this.panTo(cx, this.pan.from - d);
+        })
+        // a release between the columns drops where the highlight is; leaving the columns drops nothing
+        .on_mouse_up("left", (_e, cx) => { if (this.pan) { const moved = this.pan.moved; this.pan = null; if (moved) cx.notify(); } this.dropCard(cx); })
+        .on_hover((on, cx) => {
+          if (on) return;
+          this.pan = null;
+          if (this.dragCard) { this.dragCard = null; this.dropCol = null; this.dropNear = null; cx.notify(); }
+        })
+        .when(Boolean(this.pan?.moved), (el) => el.cursor_grabbing())
+        // a plain flex row: h_flex centres its children, which would shrink each column to its header
+        .child(div().absolute().top(0).bottom(8).left(-this.panX).flex().flex_row().gap(12).children(STAGES.map(column)))
+        // where the view is along the columns
+        .when(this.panMax > 0 && contentW > 0, (el) => el.child(div().absolute().bottom(0).h(4).rounded(2).bg(C.line2)
+          .left(Math.round((view * this.panX) / contentW)).w(Math.max(24, Math.round((view * view) / contentW))))))
       .when(this.help, (el) => el.child(this.keyList()));
   }
 
@@ -1408,9 +1624,7 @@ export default class Board extends View {
     const stay = Date.now() - (shared(STAY) ?? 0) < 3000;
     // filtered to the shown repo, the board stays: it now shows that repo's worktrees
     if (space && this.lastSpace && space.id !== this.lastSpace && !focus && (view === "board" || view === "prs") && !sideOpen && !stay && !shared(PEEK) && allSpaces()) {
-      run("layout.select", { stack: "main", child: "work" });
-      setShared(LEFT, Date.now());
-      setShared(VIEW, "work");
+      showWork();
     }
     this.lastSpace = space?.id;
     const mac = window()?.platform === "macos";
@@ -1429,8 +1643,8 @@ export default class Board extends View {
       tabEl(`tab-${t.id}`, view === "work" && t.active, [
         ...(t.status === "blocked" ? [div().w(7).h(7).rounded(4).bg(C.you)] : t.status === "working" ? [icon("spinner", 10, C.work).spin(900)] : []),
         div().child(t.name),
-      ], () => { run("tab.select", { id: t.id }); run("layout.select", { stack: "main", child: "work" }); setShared(VIEW, "work"); },
-      focus && t.status !== "blocked"));
+      ], () => { run("tab.select", { id: t.id }); showWork(); },
+      false));
     return h_flex().id("top").size_full().bg(C.top).border_b(1).border_color(C.line)
       .child(h_flex().w(mac ? 170 : 110).h_full().flex_none().pl(mac ? 84 : 16).items_center()
         .child(div().font_family(MONO).text_size(12).font_weight(700).text_color(C.accent).child("H E R D R")))
@@ -1445,18 +1659,24 @@ export default class Board extends View {
 
   // ---- the sidebar ---------------------------------------------------------------------------------------------
 
-  // every worktree in the filter by stage, each most recently used first; every agent waiting for you, the oldest
-  // question first; and how many wait in the worktrees the filter hides
+  // every worktree in the filter by stage, in the order you dragged them to (a new one on top), its agents too (a new
+  // one last, the main one first until you move it); every agent waiting for you, the oldest question first; and how
+  // many wait in the worktrees the filter hides
   groups() {
     const by = Object.fromEntries(STAGES.map(([k]) => [k, []]));
     by.away = 0;
     by.needs = [];
-    for (const w of worktrees()) {
+    const all = worktrees();
+    const saved = shared(ORDER) ?? [];
+    let order = addNew(saved, [...all].sort((x, y) => y.at - x.at).map((w) => w.key), "top");
+    order = addNew(order, all.flatMap((w) => w.agents.map((x) => x.a.address).sort((x, y) => seq(x) - seq(y))), "end");
+    if (order !== saved) setShared(ORDER, order);
+    for (const w of all) {
       if (!inScope(w.key)) { by.away += w.needs.length; continue; }
-      by[w.stage].push(w);
+      by[w.stage].push({ ...w, agents: byOrder(w.agents, (x) => x.a.address, order) });
       by.needs.push(...w.needs);
     }
-    for (const [k] of STAGES) by[k].sort((x, y) => y.at - x.at);
+    for (const [k] of STAGES) by[k] = byOrder(by[k], (w) => w.key, order);
     by.needs.sort((x, y) => (x.tab?.changed_at ?? 0) - (y.tab?.changed_at ?? 0));
     return by;
   }
@@ -1476,22 +1696,68 @@ export default class Board extends View {
     return cur;
   }
 
-  // a worktree in the sidebar: a click goes to its agent (the one that needs you, else the one used last), a
-  // right-click moves it to another stage
+  // drag to reorder: a press picks a row up, the row under the pointer shows where it lands (a line above or below
+  // it), the release puts it there. A worktree goes among the worktrees (onto another stage's, or its title, it
+  // changes stage too), an agent among its worktree's agents. Leaving the list drops nothing.
+  draggable(el, it) {
+    return el.relative()
+      .on_mouse_down("left", () => { this.drag = it; this.over = null; })
+      .on_mouse_move((e, cx) => {
+        const o = this.dropAt(it, e.local_position.y > e.bounds.height / 2);
+        if (JSON.stringify(o) !== JSON.stringify(this.over)) { this.over = o; cx.notify(); }
+      })
+      .on_mouse_up("left", (_e, cx) => this.drop(cx));
+  }
+
+  // where the dragged row would land with the pointer on this one (it: {kind: "wt" | "ag" | "head", key, space, stage})
+  dropAt(it, low) {
+    const d = this.drag;
+    if (!d || it.key === d.key) return null;
+    if (d.kind === "ag") return it.kind === "ag" && it.space === d.space ? { key: it.key, after: low } : null;
+    if (it.kind === "head") return { head: true, stage: it.stage };
+    if (it.kind === "ag") return it.space === d.key ? null : { key: it.space, after: true, stage: it.stage };
+    return { key: it.key, after: low, stage: it.stage };
+  }
+
+  drop(cx) {
+    const d = this.drag, o = this.over;
+    this.drag = null; this.over = null;
+    if (!d || !o) return;
+    if (d.kind === "wt" && o.stage !== d.stage) setStage(d.key, o.stage); // at the top of the new stage
+    if (!o.head) {
+      const known = new Set([...spaces().map((s) => s.id), ...agents().map((a) => a.address)]);
+      setShared(ORDER, moveKey((shared(ORDER) ?? []).filter((k) => known.has(k)), d.key, o.key, o.after));
+    }
+    cx.notify();
+  }
+
+  // the line where the dragged row would land: above or below this row
+  dropLine(el, above, below) {
+    return el.when(above || below, (el) => el.child(div().absolute().left(4).right(4).h(2).rounded(1).bg(C.accent)
+      .when(above, (l) => l.top(0)).when(below, (l) => l.bottom(0))));
+  }
+
+  // a worktree in the sidebar: a click goes to its main agent, a right-click moves it to another stage, a drag
+  // moves it in the list
   worktreeRow(w, cur) {
     const on = w.agents.some((x) => x.a.address === cur) || (!w.agents.length && w.space.active);
     const st = w.agents.length ? w.status ?? "idle" : null;
     const waiting = w.needs.length, working = w.agents.filter((x) => x.a.status === "working").length;
-    return h_flex().id(`wt-${w.key}`).w_full().h(30).flex_none().pl(8).pr(8).gap(8).items_center().rounded(6).cursor_pointer()
+    const row = h_flex().id(`wt-${w.key}`).w_full().h(30).flex_none().pl(8).pr(8).gap(8).items_center().rounded(6).cursor_pointer()
       .bg(on ? "#2c2838" : "#00000000").hover((s) => s.bg(on ? "#2c2838" : C.hover))
       .on_click(() => goToWorktree(w))
       .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); openStagePicker(w.key, w.name, w.stage, true); })
+      .when(this.drag?.key === w.key && Boolean(this.over), (el) => el.opacity(0.45))
       .child(div().w(12).flex_none().flex().justify_center().child(st ? statusIcon(st, 8) : icon("columns", 10, C.dim)))
       .child(div().flex_1().min_w(0).truncate().font_family(SANS).text_size(13).font_weight(500)
         .text_color(on || waiting ? C.text : C.soft).child(w.name))
+      .when(!!w.space.machine, (el) => el.child(machineTag(w.space.machine)))
       .when(waiting > 0, (el) => el.child(mono(10, C.you, `${waiting}●`)))
       .when(working > 0, (el) => el.child(mono(10, C.work, `${working}◌`)))
       .when(w.subs.length > 0, (el) => el.child(mono(10, C.dim, `+${w.subs.length}`)));
+    const o = this.over, here = this.drag?.kind === "wt" && o?.key === w.key;
+    return this.dropLine(this.draggable(row, { kind: "wt", key: w.key, stage: w.stage }),
+      here && !o.after, here && o.after && !(w.agents.length > 1));
   }
 
   // an agent under its worktree, when the worktree has more than one (with one, the worktree's row goes to it)
@@ -1500,15 +1766,21 @@ export default class Board extends View {
     const age = a.status === "blocked" ? (tab?.changed_at ? dur(now - tab.changed_at) : "")
       : a.status === "working" ? (tab?.working_since ? dur(now - tab.working_since) : "") : x.at ? dur(now - x.at) : "";
     const name = cleanTitle(a.title) || (tab?.named ? tab.name : "") || a.program?.name || a.address;
-    return h_flex().id(`ag-${a.address}`).w_full().h(26).flex_none().pl(28).pr(8).gap(7).items_center().rounded(6).cursor_pointer()
+    const row = h_flex().id(`ag-${a.address}`).w_full().h(26).flex_none().pl(28).pr(8).gap(7).items_center().rounded(6).cursor_pointer()
       .bg(on ? "#2c2838" : "#00000000").hover((s) => s.bg(on ? "#2c2838" : C.hover))
       .on_click(() => goToAgent(a.address))
       .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); openStagePicker(w.key, w.name, w.stage, true); })
+      .when(this.drag?.key === a.address && Boolean(this.over), (el) => el.opacity(0.45))
       .child(div().w(10).flex_none().flex().justify_center().child(statusIcon(a.status, 7)))
       .child(div().flex_1().min_w(0).truncate().font_family(SANS).text_size(12)
         .text_color(on || a.status === "blocked" || a.status === "done" ? C.text : C.muted).child(name))
       .when(x.subs.length > 0, (el) => el.child(mono(10, C.dim, `+${x.subs.length}`)))
       .child(mono(10, a.status === "blocked" ? C.you : C.dim, age));
+    // an agent dragged lands by this row; a worktree dragged below this worktree, under its last agent
+    const o = this.over, mine = this.drag?.kind === "ag" && o?.key === a.address;
+    const wtBelow = this.drag?.kind === "wt" && o?.key === w.key && o.after && w.agents[w.agents.length - 1] === x;
+    return this.dropLine(this.draggable(row, { kind: "ag", key: a.address, space: w.key, stage: w.stage }),
+      mine && !o.after, (mine && o.after) || wtBelow);
   }
 
   // New agent's stage, given to the worktree's space once it shows up (space.new doesn't say which it made)
@@ -1556,7 +1828,7 @@ export default class Board extends View {
     const needsRow = (waiting || by.away) && h_flex().id("nav-needs").h(34).flex_none().rounded(7).items_center().cursor_pointer()
       .when(narrow, (el) => el.w(40).justify_center().gap(4)).when(!narrow, (el) => el.w_full().px(10).gap(8))
       .bg(C.youBg).border(1).border_color(C.youLine).hover((st) => st.opacity(0.85))
-      .on_click(() => (waiting ? goToAgent(by.needs[0].a.address) : setShared(SCOPE, "all")))
+      .on_click(() => { if (waiting) goToAgent(by.needs[0].a.address); else { setShared(SCOPE, "all"); setShared(MACHINE, null); } })
       .child(div().w(8).h(8).flex_none().rounded(4).bg(C.you).loop("opacity", { from: 0.35, to: 1, period: 1200 }))
       .when(narrow, (el) => el.child(mono(12, C.you, String(waiting || by.away))))
       .when(!narrow, (el) => el
@@ -1618,12 +1890,19 @@ export default class Board extends View {
         .child(div().id(`gb-${k}`).w(22).h(22).flex_none().rounded(5).flex().items_center().justify_center()
           .text_color(marked ? C.text : C.dim).hover((st) => st.bg(C.raised).text_color(C.text))
           .on_click((_e, cx) => { cx.stop_propagation(); openBoard(marked ? null : k); })
-          .child(svg(`mods/${MOD}/columns.svg`).size(13)));
+          .child(svg(`mods/${MOD}/columns.svg`).size(13)))
+        // a worktree dropped on the title goes to the top of this stage
+        .on_mouse_move((_e, cx) => {
+          const o = this.drag?.kind === "wt" ? this.dropAt({ kind: "head", stage: k }) : null;
+          if (JSON.stringify(o) !== JSON.stringify(this.over)) { this.over = o; cx.notify(); }
+        })
+        .on_mouse_up("left", (_e, cx) => this.drop(cx));
+      const headOn = this.over?.head && this.over.stage === k;
       // a flex row (stretching, unlike h_flex) so the group's colour bar runs its full height
       return div().id(`group-${k}`).w_full().flex_none().flex().flex_row().gap(4)
         .child(div().w(3).flex_none().rounded(2).bg(color).when(!list.length, (el) => el.opacity(0.3)))
         .child(v_flex().flex_1().min_w(0).gap(1)
-          .child(head)
+          .child(this.dropLine(head.relative(), false, headOn))
           .when(open, (el) => el.children(list.flatMap((w) => [this.worktreeRow(w, cur),
             ...(w.agents.length > 1 ? w.agents.map((x) => this.agentRow(w, x, cur)) : [])]))));
     };
@@ -1632,10 +1911,14 @@ export default class Board extends View {
       .on_size_change((size, cx) => { this.size = size; cx.notify(); })
       .child(newBtn).child(boardRow).child(asksRow).child(prsRow)
       .child(div().pt(4).child(scopeSwitch("nav-scope", true)))
+      .children(machineList().length > 1 ? [machineSwitch("nav-machine", true)] : [])
       .children(needsRow ? [div().pt(4).child(needsRow)] : [])
       .child(v_flex().id("nav-groups").w_full().flex_1().min_h(0).mt(4).gap(4).overflow_y_scrollbar()
+        // a release between rows still drops (where the line shows); leaving the list drops nothing
+        .on_mouse_up("left", (_e, cx) => this.drop(cx))
+        .on_hover((on, cx) => { if (!on && this.drag) { this.drag = null; this.over = null; cx.notify(); } })
         .children(STAGES.map(group))
-        .child(div().px(8).pt(6).child(mono(10, C.dim, "right-click a worktree to change its stage"))));
+        .child(div().px(8).pt(6).child(mono(10, C.dim, "drag to reorder · right-click for the stage"))));
   }
 
   // the stage picker and New agent, closing (Esc, a pick, a click beside): the board takes the keyboard back
@@ -1709,9 +1992,7 @@ export default class Board extends View {
           .when(!it.prunable, (el) => el.child(btn(`open-${n}`, "Open", "plain", () => {
             closeOverlay(p.overlay);
             run("space.new", { folder: it.path });
-            run("layout.select", { stack: "main", child: "work" });
-            setShared(LEFT, Date.now());
-            setShared(VIEW, "work");
+            showWork();
           })))
           .child(it.dirty && !it.arm ? btn(`rm-${n}`, "Remove…", "plain", (cx) => { it.arm = true; cx.notify(); })
             : btn(`rm-${n}`, it.dirty ? "Remove anyway" : "Remove", it.dirty ? "danger" : "plain", (cx) => this.removeTree(cx, it, Boolean(it.dirty)))));
@@ -1793,6 +2074,8 @@ export default class Board extends View {
     // the worktree it's for: the one given (+ Agent), else the shown space, whose repo a new worktree comes from
     this.src = spaces().find((s) => s.id === (p.space ?? activeSpace()?.id)) ?? null;
     this.mode = p.space ? "here" : "worktree"; // "worktree": a new one; "here": one more agent in this.src
+    this.fixed = Boolean(p.space); // + Agent on a worktree: its machine and space, no picking
+    this.machine = this.src?.machine ?? null; // where the agent runs: null this computer, else a machine's name
     this.repo = undefined; // undefined: looking, null: not in git, else {top, main, name, base, home}
     this.busy = false;
     this.error = "";
@@ -1811,6 +2094,8 @@ export default class Board extends View {
     this.issues = null; // your open Linear issues, when LINEAR_API_KEY is set; null: none (no key, or not read)
     this.found = null; // Linear's search for what you typed, when your own issues don't have it
     this.linearKey = null;
+    this.orchestrate = true; // opt-out: with a Linear issue, the agent starts on the orchestrator skill
+    this.canOrchestrate = false; // the skill is installed where the agent runs
     this.ref = InputState.new({ placeholder: "Paste a Linear issue, PR or Slack link, or search your issues" });
     this.ref.on("change", (_e, cx) => { this.refText = this.ref.value(); this.found = null; this.searchLinear(cx); cx.notify(); });
     this.ref.on("submit", (_e, cx) => this.addRef(cx));
@@ -1834,16 +2119,35 @@ export default class Board extends View {
       } catch (e) { this.linearError = String(e.message ?? e); }
       cx.notify();
     });
-    const on = this.src?.machine ?? undefined;
+    this.probe(cx);
+  }
+
+  // what the machine the agent runs on has: its agents, the orchestrator skill, and the repo of the space it starts
+  // from; asked again when you pick another machine (an answer for the one before is dropped)
+  probe(cx) {
+    const gen = (this.gen = (this.gen ?? 0) + 1), stale = () => gen !== this.gen;
+    this.choices = NEW_AGENTS;
+    this.canOrchestrate = false;
+    this.repo = undefined;
+    const on = this.machine ?? undefined;
     cx.spawn(async (cx) => {
       try {
         const known = await knownAgents({ on });
+        if (stale()) return;
         this.choices = NEW_AGENTS.map((a) => {
           const k = known.find((x) => x.key === a.key);
           return k ? { ...a, ...k, icon: k.icon ?? a.icon } : { ...a, installed: false };
         });
       } catch { /* keep the defaults */ }
-      cx.notify();
+      if (!stale()) cx.notify();
+    });
+    cx.spawn(async (cx) => {
+      try {
+        const skill = await orchestrateSkill();
+        const r = skill && await exec("sh", ["-c", 'test -f "$HOME/.claude/skills/$1/SKILL.md"', "sh", skill], { on });
+        if (!stale()) { this.skill = skill; this.canOrchestrate = r?.code === 0; }
+      } catch { /* not there */ }
+      if (!stale()) cx.notify();
     });
     cx.spawn(async (cx) => {
       try {
@@ -1851,11 +2155,28 @@ export default class Board extends View {
         const r = dir ? await exec("sh", ["-c", REPO, "sh", dir], { on }) : null;
         const v = r?.code === 0 ? kv(r.stdout) : {};
         const main = v.common ? (v.common.endsWith("/.git") ? v.common.slice(0, -5) : v.common) : null;
+        if (stale()) return;
         this.repo = v.top && main && v.home ? { top: v.top, main, name: base(main), base: v.base || null, home: v.home } : null;
-      } catch { this.repo = null; }
+      } catch { if (stale()) return; this.repo = null; }
       if (!this.repo && this.mode === "worktree") this.mode = "here";
-      cx.notify();
+      if (!stale()) cx.notify();
     });
+  }
+
+  // another machine: it starts from the space there in the same repo (the shown one, else the one used last), else
+  // any space there, and what that machine has is asked again
+  pickMachine(cx, m) {
+    if (m === this.machine) return;
+    const repos = shared(REPOS) ?? {}, name = this.src ? repos[this.src.id]?.name : null;
+    const there = spaces().filter((s) => (s.machine ?? null) === m);
+    const used = (s) => Math.max(0, ...s.tabs.map((t) => t.changed_at ?? 0));
+    const best = (list) => list.find((s) => s.active) ?? [...list].sort((x, y) => used(y) - used(x))[0];
+    const same = there.filter((s) => name && repos[s.id]?.name === name);
+    this.machine = m;
+    this.src = best(same.filter((s) => !isWorktree(s) && !s.folder?.includes("/.herdr/worktrees/"))) ?? best(same) ?? best(there) ?? null;
+    this.mode = "worktree";
+    this.probe(cx);
+    cx.notify();
   }
 
   // your issues that match what you typed (by id or title), then Linear's search for it
@@ -1912,11 +2233,25 @@ export default class Board extends View {
     return shortTitle(issue?.title || this.text) || (issue ? issue.id : "");
   }
 
+  // whether the agent starts on the orchestrator skill: offered (a Linear issue, the skill installed) and not turned off
+  orchestrating() {
+    return this.orchestrate && this.canOrchestrate && this.refs.some((r) => r.kind === "linear");
+  }
+
+  // the agent it starts: the one picked, but always Claude Code to orchestrate (the skill orchestrates only there)
+  agent() {
+    const key = this.orchestrating() ? "claude" : this.pickKey;
+    return this.choices.find((x) => x.key === key) ?? this.choices[0];
+  }
+
   // the first message: what you wrote (or, with a Linear issue and nothing written, to start on it), then the
-  // references as a Context block
+  // references as a Context block; to orchestrate, the skill first and your message required (the skill reads the
+  // issue's sub-issues itself)
   prompt() {
     const issue = this.refs.find((r) => r.kind === "linear");
-    const ask = this.text.trim() || (issue ? `Start working on the Linear issue ${issue.id}.` : "");
+    if (this.orchestrating() && !this.text.trim()) return "";
+    const ask = this.orchestrating() ? `/${this.skill} ${this.text.trim()}`
+      : this.text.trim() || (issue ? `Start working on the Linear issue ${issue.id}.` : "");
     return this.refs.length ? [ask, "", "Context:", ...this.refs.map(refLine)].join("\n").trim() : ask;
   }
 
@@ -1938,19 +2273,18 @@ export default class Board extends View {
   // worktree; with a first message the agent starts on it and the board stays, without one its terminal shows
   start(cx) {
     if (this.busy) return;
-    const a = this.choices.find((x) => x.key === this.pickKey) ?? this.choices[0];
+    const a = this.agent(), orchestrating = this.orchestrating();
     if (!a || a.installed === false) return;
-    if (this.mode === "worktree" && !this.repo) return;
+    if (this.mode === "worktree" ? !this.repo : !this.src) return;
+    if (orchestrating && !this.text.trim()) { this.task.focus(); return; }
     const task = this.prompt();
     const issue = this.refs.find((r) => r.kind === "linear");
     const name = issue ? trunc(`${issue.id}${issue.title ? ` ${issue.title}` : ""}`, 40) : this.text.trim() ? trunc(this.text.trim(), 40) : a.name;
     const args = launch(a, task);
     const done = () => {
-      setShared(PICK, a.key);
+      if (!orchestrating) setShared(PICK, a.key); // the agent you pick next time stays yours
       if (!task) {
-        run("layout.select", { stack: "main", child: "work" });
-        setShared(LEFT, Date.now());
-        setShared(VIEW, "work");
+        showWork();
       }
       closeOverlay(props().overlay);
     };
@@ -2011,13 +2345,14 @@ export default class Board extends View {
   newDialog() {
     const h = home();
     const tilde = (p) => (p && h && p.startsWith(h) ? "~" + p.slice(h.length) : p ?? "");
-    const a = this.choices.find((x) => x.key === this.pickKey) ?? this.choices[0];
+    const a = this.agent(), orchestrating = this.orchestrating();
     const fresh = this.mode === "worktree";
     const label = (text) => div().pt(14).pb(7).child(mono(10, C.dim, text));
     const radio = (on) => div().w(14).h(14).flex_none().rounded(7).border(1).border_color(on ? C.accent : C.line2)
       .flex().items_center().justify_center().children(on ? [div().w(6).h(6).rounded(3).bg(C.accent)] : []);
     const agentCard = (x) => {
-      const on = x.key === a.key, off = x.installed === false;
+      // to orchestrate, only Claude Code: the others dim, as an agent that isn't installed
+      const on = x.key === a.key, off = x.installed === false || (orchestrating && x.key !== a.key);
       return h_flex().id(`new-${x.key}`).flex_1().min_w(0).h(52).px(12).gap(10).items_center().rounded(8).border(1)
         .border_color(on ? C.accent : C.line2).bg(on ? "#1c1926" : C.card).cursor_pointer().hover((st) => st.bg(on ? "#1c1926" : C.hover))
         .when(off, (el) => el.opacity(0.45))
@@ -2025,7 +2360,8 @@ export default class Board extends View {
         .child(x.tint ? svg(x.icon).size(22).flex_none().text_color(C.text) : image(x.icon).w(22).h(22).flex_none())
         .child(v_flex().flex_1().min_w(0)
           .child(div().font_family(SANS).text_size(14).text_color(C.text).child(x.name))
-          .child(div().truncate().child(mono(10, off ? C.red : C.dim, off ? "not installed" : x.run.join(" ")))))
+          .child(div().truncate().child(mono(10, x.installed === false ? C.red : C.dim,
+            x.installed === false ? "not installed" : off ? "orchestrating runs Claude Code" : x.run.join(" ")))))
         .child(radio(on));
     };
     const where = (id, on, enabled, title, sub, onClick) => h_flex().id(id).w_full().h(42).px(12).gap(10).items_center().rounded(7).border(1)
@@ -2039,18 +2375,30 @@ export default class Board extends View {
       .border_color(primary ? C.accent : C.line2).bg(primary ? C.accent : C.raised).text_color(primary ? "#0f0f11" : C.text)
       .font_family(SANS).text_size(13).font_weight(primary ? 600 : 400).cursor_pointer().hover((st) => st.opacity(0.85))
       .when(!enabled, (el) => el.opacity(0.4)).on_click(onClick).child(text);
-    const repoSub = this.repo === undefined ? "looking for the repo…" : this.repo
+    const repoSub = !this.src ? `no space on ${machineLabel(this.machine)} to start from`
+      : this.repo === undefined ? "looking for the repo…" : this.repo
       ? `${this.repo.name} · from ${this.repo.base ?? "HEAD"} · ~/.herdr/worktrees/${this.repo.name}/${slugPath(this.branchName())}`
       : "not in a git repo";
     const srcName = this.src ? (this.src.named ? this.src.name : this.src.branch || this.src.name) : "no space";
-    const ready = a && a.installed !== false && !this.busy && (!fresh || this.repo);
+    const ready = a && a.installed !== false && !this.busy && (fresh ? this.repo : this.src) && (!orchestrating || this.text.trim());
     return v_flex().id("new").size_full().p(18).bg("#18181b").text_color(C.text)
       .child(h_flex().items_center()
         .child(div().flex_1().font_family(SANS).text_size(16).font_weight(600).child("New agent"))
         .child(mono(11, C.dim, "Esc")))
       .child(label("AGENT"))
       .child(h_flex().w_full().gap(8).children(this.choices.map(agentCard)))
-      .child(label("WHERE"))
+      .child(this.fixed || machineList().length < 2 ? label("WHERE") : h_flex().w_full().items_center()
+        .child(div().flex_1().child(label("WHERE")))
+        // the machine it runs on: the worktree and the agent are made there
+        .child(h_flex().id("new-machines").mt(6).flex_none().p(2).gap(2).rounded(7).border(1).border_color(C.line2).bg(C.main)
+          .children(machineList().map((m) => {
+            const on = m === this.machine;
+            return h_flex().id(`new-m-${m ?? "local"}`).h(22).px(8).gap(5).items_center().rounded(5).cursor_pointer()
+              .bg(on ? C.raised : "#00000000").hover((st) => st.bg(on ? C.raised : C.hover))
+              .on_click((_e, cx) => this.pickMachine(cx, m))
+              .child(icon("machine", 11, on ? C.text : C.dim))
+              .child(div().font_family(SANS).text_size(12).text_color(on ? C.text : C.muted).child(machineLabel(m)));
+          }))))
       .child(v_flex().w_full().gap(6)
         .child(where("new-worktree", fresh, Boolean(this.repo), "New worktree", repoSub,
           (cx) => { this.mode = "worktree"; this.branch.focus(); cx.notify(); }))
@@ -2072,14 +2420,16 @@ export default class Board extends View {
             .child(div().font_family(SANS).text_size(12).text_color(on ? C.text : C.soft).child(name));
         }))))
       .child(label("CONTEXT"))
-      .child(Input.new(this.ref).h(34).px(10).rounded(8).border(1).border_color(this.refFocused ? C.accentDim : C.line2).bg(C.main).font_family(SANS).text_size(12).text_color(C.text))
-      .when(this.refFocused && this.matches().length > 0, (el) => el.child(v_flex().w_full().mt(4).p(3).rounded(7).border(1).border_color(C.line2).bg(C.card)
+      // the issues that match drop down over what's below, in a layer of their own, so the dialog keeps its size
+      .child(Popup.new("new-issues", Input.new(this.ref).h(34).px(10).rounded(8).border(1).border_color(this.refFocused ? C.accentDim : C.line2).bg(C.main).font_family(SANS).text_size(12).text_color(C.text))
+        .w_full().anchor("top_left")
+        .when(this.refFocused && this.matches().length > 0, (el) => el.content(v_flex().w(504).mt(4).p(3).rounded(7).border(1).border_color(C.line2).bg(C.card)
         .children(this.matches().map((i) => h_flex().id(`issue-${i.identifier}`).h(26).px(7).gap(8).items_center().rounded(5).cursor_pointer()
           .hover((st) => st.bg(C.raised))
           .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.addRef(cx, i); })
           .child(div().w(70).flex_none().child(mono(11, REF_KINDS.linear[1], i.identifier)))
           .child(div().flex_1().min_w(0).truncate().font_family(SANS).text_size(12).text_color(C.soft).child(i.title))
-          .child(mono(10, C.dim, i.state?.name ?? ""))))))
+          .child(mono(10, C.dim, i.state?.name ?? "")))))))
       .child(h_flex().w_full().pt(6).flex_wrap().gap(6)
         .children(this.refs.map((r, n) => h_flex().id(`ref-${n}`).flex_none().max_w(470).h(24).pl(7).pr(4).gap(6).items_center().rounded(6)
           .border(1).border_color(`${REF_KINDS[r.kind][1]}55`).bg(`${REF_KINDS[r.kind][1]}14`)
@@ -2091,15 +2441,51 @@ export default class Board extends View {
             .on_click((_e, cx) => { this.refs.splice(n, 1); cx.notify(); }).child("×"))))
         .when(!this.refs.length, (el) => el.child(mono(10, C.dim, this.issues ? "⏎ adds · your Linear issues show as you type"
           : "⏎ adds · set LINEAR_API_KEY in your shell to pick from your Linear issues"))))
-      .child(label(this.refs.some((r) => r.kind === "linear") ? "MESSAGE (OPTIONAL: EMPTY STARTS ON THE ISSUE)" : "FIRST MESSAGE (OPTIONAL)"))
+      // with a Linear issue: start on the orchestrator skill (opt-out)
+      .when(this.canOrchestrate && this.refs.some((r) => r.kind === "linear"), (el) => el.child(
+        h_flex().id("new-orchestrate").w_full().mt(10).h(42).px(12).gap(10).items_center().rounded(7).border(1)
+          .border_color(this.orchestrate ? C.accentDim : C.line2).bg(this.orchestrate ? "#1c1926" : "#00000000").cursor_pointer()
+          .hover((st) => st.bg(this.orchestrate ? "#1c1926" : C.hover))
+          .on_click((_e, cx) => { this.orchestrate = !this.orchestrate; this.task.focus(); cx.notify(); })
+          .child(div().w(14).h(14).flex_none().rounded(3).border(1).border_color(this.orchestrate ? C.accent : C.line2)
+            .bg(this.orchestrate ? C.accent : "#00000000").flex().items_center().justify_center()
+            .children(this.orchestrate ? [div().text_size(10).text_color("#0f0f11").child("✓")] : []))
+          .child(div().flex_none().font_family(SANS).text_size(13).text_color(C.text).child("Orchestrate"))
+          .child(div().flex_1().min_w(0).truncate().child(mono(11, C.dim, `/${this.skill} in Claude Code · its agents here`)))))
+      .child(label(orchestrating ? "WHAT THE ORCHESTRATOR SHOULD DO (REQUIRED)"
+        : this.refs.some((r) => r.kind === "linear") ? "MESSAGE (OPTIONAL: EMPTY STARTS ON THE ISSUE)" : "FIRST MESSAGE (OPTIONAL)"))
       .child(Input.new(this.task).h(38).px(10).rounded(8).border(1).border_color(C.line2).bg(C.main).font_family(SANS).text_size(13).text_color(C.text))
       .when(!!this.error, (el) => el.child(div().pt(8).child(mono(11, C.red, this.error))))
       .child(div().flex_1())
       .child(h_flex().pt(14).gap(8).items_center()
         .child(div().flex_1().min_w(0).truncate().child(mono(11, C.dim, this.busy ? "creating the worktree…"
+          : orchestrating && !this.text.trim() ? "say what the skill should do"
+          : orchestrating ? "it starts orchestrating; the board stays"
           : this.prompt() ? "it starts working; the board stays" : "its terminal opens, to type in")))
         .child(button("new-cancel", "Cancel", false, true, () => closeOverlay(props().overlay)))
         .child(button("new-start", this.busy ? "Creating…" : "Start  ⏎", true, ready, (_e, cx) => this.start(cx))));
+  }
+
+  // the bar over an agent, beside the board (where: "side", the focus-term block) or in its place ("main", the work
+  // block): which agent, and Minimize, which puts the agent away and gives the board the screen and the keyboard
+  agentHead() {
+    const side = props()?.where === "side";
+    // beside the board: the agent it last showed there, else the one the block shows by itself (Focus with no question)
+    const f = focused();
+    const a = (side ? [shared(SHOWN), f?.agent] : [f?.terminal]).map((x) => agents().find((y) => y.address === x)).find(Boolean);
+    const tab = !a && !side ? activeSpace()?.tabs?.find((t) => t.active) : null;
+    const title = a ? agentTitle(a) ?? a.program?.name ?? a.address : tab?.name ?? activeSpace()?.name ?? "";
+    const where = a ? a.space_name : tab ? activeSpace()?.name : null;
+    return h_flex().id("agent-head").size_full().px(10).gap(8).items_center().bg(C.top).border_b(1).border_color(C.line)
+      .children(a ? [statusIcon(a.status, 8)] : [])
+      .child(div().min_w(0).flex_shrink_1().font_family(SANS).text_size(12).text_color(C.text).child(trunc(title, 80)))
+      .children(where && where !== title ? [div().min_w(0).flex_1().child(mono(10, C.dim, trunc(where, 40)))] : [div().flex_1()])
+      .child(h_flex().id("minimize").flex_none().h(22).px(8).gap(6).items_center().rounded(5).cursor_pointer()
+        .border(1).border_color(C.line2).hover((st) => st.bg(C.hover))
+        .on_click(() => minimize(side))
+        .child(icon("minimize", 12, C.muted))
+        .child(div().font_family(SANS).text_size(12).text_color(C.soft).child("Minimize"))
+        .when(!side, (el) => el.child(mono(10, C.dim, "⌘E"))));
   }
 
   bottom() {
@@ -2110,6 +2496,7 @@ export default class Board extends View {
     return h_flex().id("bottom").size_full().px(12).gap(16).items_center().bg(C.side).border_t(1).border_color(C.line)
       .child(div().flex_1())
       .when(!!c.problem, (el) => el.child(item(String(c.problem).slice(0, 80), C.red)))
+      .when(!!c.offline?.length, (el) => el.child(item(`${c.offline.join(", ")} offline`, C.muted, C.dim)))
       .child(item(c.when ? `read ${c.when}` : "reading…", C.dim))
       .child(item(new Date(this.now).toTimeString().slice(0, 5), C.muted));
   }
