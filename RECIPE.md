@@ -1,16 +1,18 @@
 # Board (Herdr)
 
 A Linear-style board of your git worktrees, fed by Herdr itself, git and gh. Every worktree is a card in a stage you
-choose (Perpétuo, Todo, In progress, In review, Watch, Temp, Done, Archived, Paused), dragged between columns or
+choose (Perpétuo, Planning, In progress, In review, Watch, Temp, Done, Archived, Paused), dragged between columns or
 within one; on it, every agent working there and the sub-agents they started, counted by status, its branch, commits,
 uncommitted lines and pull request, the machine it is on, and the question an agent is waiting on, with every option
 to click. A click on a card shows its agent beside the board, which stays clickable; Minimize on the bar over an agent
 gives the board back. A sidebar lists the worktrees by stage, in the order you drag them to, with a link to each agent.
 New agent (⌘N) makes a worktree of the shown repo, on this computer or one of Herdr's ssh machines, and starts Claude
-Code or OpenCode in it on your message plus a Context block (a Linear issue, a PR, a Slack message, any link), or your
-orchestrator skill on a Linear issue. Done removes the worktree after
-3 days; ⌘W on a worktree's last tab removes it at once. A PRs view (⌘⇧G) lays out the open pull requests that wait on
-you, other people's and yours, as a kanban of where each one stands. The whole board works from the keyboard.
+Code or OpenCode in it on your message plus a Context block (a Linear issue, a PR, a Slack message, any link), or a
+skill of yours on a Linear issue. With a Linear key, the first column lists your Linear issues in Todo; dragging one
+onto Planning or In progress starts it (a worktree, an agent, that column's skill) after a short confirmation, and
+moves it to In Progress in Linear when it lands there. Done removes the worktree after 3 days; ⌘W on a worktree's last
+tab removes it at once. A PRs view (⌘⇧G) lays out the open pull requests that wait on you, other people's and yours,
+as a kanban of where each one stands. The whole board works from the keyboard.
 
 ![Board (Herdr)](preview.png)
 
@@ -38,7 +40,7 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
     monitor icon (`machine.svg`).
   - A needs-you row when an agent waits (yellow on `#1f1a10`, pulsing dot): `2 need you`, plus `N elsewhere` when the
     scope hides some; a click goes to the oldest question.
-  - One group per stage: a 3 px bar in the stage's color, a foldable header (`▾ Todo  3`, and a columns button that
+  - One group per stage: a 3 px bar in the stage's color, a foldable header (`▾ Planning  3`, and a columns button that
     opens the board on that column), then each worktree (30 px: status icon, its name, a machine tag when it's on
     another machine, `2●` waiting, `1◌` working, `+3` sub-agents) and, when it has more than one agent, each agent under
     it (26 px, indented 28 px, its age). Archived starts folded. Rows drag: a 2 px accent line shows where one lands
@@ -59,6 +61,10 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
     then a 170 px search field (`/`), a hint (`S stage · ? keys`), `+ New agent  N` and `◎ Focus  F`.
   - `devbox offline · its cards show the last read` (11 px mono, muted) under the numbers while Herdr can't reach a
     machine.
+  - **The Linear column**, first, only with `LINEAR_API_KEY`: header `▾ ● LINEAR · TODO 3` in `#8b93f8`. A card per
+    issue assigned to you whose state type is `unstarted`, minus the ones a worktree already has or that are being
+    started: the ID in `#8b93f8` and a `↗ Linear` button (opens the issue), the title, a dim line with the project
+    (else the team) and the priority unless `No priority`. Its key is `linear:<ID>`.
   - **Columns**, one per stage: header `▾ ● IN PROGRESS 2` (click folds it). A folded column is 140 px, an empty one
     118 px; columns with cards share the rest but never go below 260 px, and a column whose card asks a question widens
     to fit its options (longest option label × 6.6 + 100 px, or the question's length ÷ 3, up to 480 px). When they
@@ -68,7 +74,9 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
     the sidebar marked has a border and a tint in its color.
   - **A card**: a 3 px left bar in the worktree's status color; the project chip (one of 8 colors, from its name), the
     branch, a machine tag (its name, such as `devbox`, or `devbox · offline` dimmed) when it's on another machine, the
-    stage button (`● In progress ▾`, tinted in the stage color); the title (14 px semibold); the agents
+    stage button (`● In progress ▾`, tinted in the stage color); the title (14 px semibold); when it has them, a row of
+    20 px link pills under the title: `↗ ENG-12` (`#8b93f8`, opens the issue) and, in Planning, `📄 Plan ready`
+    (`#53cf91`, opens the plan); the agents
     counted (`2 waiting · 1 working`) and, with sub-agents, `· 3 sub-agents` counted too; up to 4 agent lines (status
     icon, program icon, what it says it's doing, a `+2` sub-agent pill, its age) and `+N more`; the question box; the
     facts (`3 commits`, `2 uncommitted`, `+120 −8`, `1 unpushed`, `PR #42`, `✓ checks` / `✗ checks` / `checks running`,
@@ -107,11 +115,17 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
     this worktree`); for a new worktree `BRANCH` (mono input, `empty: <the branch it will get>`, `on the board: <the
     title it will get>`) and `STAGE` (8 chips); `CONTEXT` (one input; your Linear issues drop down as you type; each
     reference a removable chip colored by kind: Linear `#8b93f8`, PR `#53cf91`, Slack `#e88cc8`, link `#6fb3f2`, note
-    `#8a898e`); with a Linear issue and the orchestrator skill (below) installed on that machine, a 42 px checkbox row
-    `Orchestrate`, on by default, `/<skill> in Claude Code · its agents here`, which turns the agent into Claude Code
-    and the message label into `WHAT THE ORCHESTRATOR SHOULD DO (REQUIRED)`; `FIRST MESSAGE (OPTIONAL)` (or `MESSAGE
-    (OPTIONAL: EMPTY STARTS ON THE ISSUE)`); the error in red; a hint
+    `#8a898e`); when `board.json` names skills installed on that machine (below), `SKILL · RUNS IN CLAUDE CODE` with
+    `None` and one chip per skill, which turns the agent into Claude Code (the skill follows the stage when the dialog
+    came from a Linear card, until you pick one); opened from a Linear card's summary, a line `New worktree of
+    <repo>` when the shown space's repo isn't the remembered one; `FIRST MESSAGE (OPTIONAL)` (or `MESSAGE
+    (OPTIONAL: EMPTY STARTS ON THE ISSUE)`, required with a skill and no reference); the error in red; a hint
     (`it starts working; the board stays` or `its terminal opens, to type in`), `Cancel`, `Start ⏎`.
+  - **Start an issue** (420×330), opened by a Linear card dropped on Planning or In progress, ⏎ or S on it:
+    `Start ENG-12?`, then rows `Machine`, `Agent`, `Repo`, `Branch`, `Skill`, `Linear` (`Todo → In Progress`, or
+    `stays in Todo`), a dim line saying why it can't start (`devbox is offline`, `still checking…`, `<skill> isn't
+    installed for <repo>`), and `⏎ Start` · `E Edit` · `Esc Cancel`. Machine, agent and repo are the last start's
+    (`boardh.last`), else the shown space's. E opens New agent with all of it (Esc there comes back here).
   - **Stage picker** (250 px wide, 44 + 30 per stage + 40 high): `MOVE <title> TO`, one 30 px row per stage (dot, name,
     `✓` on the current one, its number), and for a worktree a red `× Delete worktree…  ⌫`. A popup at the pointer for a
     click, a centered dialog for a key.
@@ -143,6 +157,24 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
 
 ## How it behaves
 
+- **The Linear column.** Read every 60 s and on a forced refresh: `viewer.assignedIssues(filter: {state: {type: {eq:
+  "unstarted"}}})` with each issue's id, identifier, title, url, branchName, priority, team and project, plus the
+  organization's `urlKey` and the team keys. A failed read keeps the last list and shows `linear: <reason>` in the
+  bottom bar; every request gives up after 20 s. Without a key the column isn't drawn (the key is looked up at start,
+  on a forced refresh, then after 5 min, 15 min and hourly).
+  - A Linear card drops only on Planning (`todo`) or In progress; anywhere else it goes back. Nothing starts but the
+    summary's ⏎ (or New agent's); key repeats are ignored, and a start for an issue started under 2 min ago is refused.
+  - One issue, one card: an issue is hidden while it starts (`boardh.starting`, 2 min, removed if the start fails) and
+    once a worktree has it: `boardh.spaceIssues` (space → `{id, url}`, set when the board makes the worktree) or the
+    branch's last segment starting with `<TEAMKEY>-<n>` (not under `fix/`, `feat/` and such folders).
+  - Started onto In progress (the stage it ends in counts, also when changed in E), the dialog queues
+    `{uuid, teamId, id}` in `boardh.linearMoves`; the board takes the team's `started` state with the lowest position
+    and runs `issueUpdate(id, {stateId})`. A failure shows `<ID> not moved in Linear: <reason>` in red. Nothing else is
+    written to Linear; labels are never touched.
+- **Plans.** git's read of each worktree also looks for the newest `tmp/*/plan/report.md` or `report.html` (the HTML
+  when both); a Planning card with one shows `📄 Plan ready`. A click opens a local HTML as it is; Markdown, or a file
+  on another machine (read with `readTextFile(…, {on})`), is written as a page under `~/.config/herdr-app/cache/plans/`
+  and opened.
 - **Worktrees, not agents.** Each Herdr space is one card. Its main agent, where a click on the worktree goes, is one
   no other agent in that space started (by the `parent` chain), the one with no parent at all first, then the oldest
   (hc addresses count up in base 36: `t9z` before `ta0`); never a sub-agent.
@@ -341,9 +373,13 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   "board-herdr.close", "cmd-shift-a": "board-herdr.asks", "cmd-shift-b": "board-herdr.open-board", "cmd-shift-g":
   "board-herdr.prs"}` and under `global`
   `"cmd-shift-b": "layout.switch:board-herdr"`.
-- `~/.config/herdr-app/board.json` is optional: `{"orchestrate": "<a folder in ~/.claude/skills>"}` names the
-  orchestrator skill New agent offers with a Linear issue (Claude Code starts on `/<skill> <your message>` and the
-  Context). Without it, or where the skill isn't installed, Orchestrate isn't offered.
+- `~/.config/herdr-app/board.json` is optional: `skills` (the skills New agent offers, each found in
+  `~/.claude/skills/<name>/SKILL.md` or the repo's `.claude/skills/<name>/SKILL.md` on that machine), `stageSkills`
+  (`{"todo": …, "in_progress": …}`: what a Linear card dropped there runs), `issueArg` (skills whose first argument is
+  the issue ID) and `skillFlags` (flags always passed). The older `{"orchestrate": "<skill>"}` reads as that skill for
+  In progress. Claude Code starts on `/<skill> [ID] [flags] <your message>` and the Context. Pure rules (this file,
+  the issue in a branch, which drops start, the started state, the first message, the column's filter) in
+  `linear-rules.js`; Markdown to a page in `md-html.js`.
 - `~/.config/herdr-app/asks.json` is optional (Asks' settings: `label`, `log`, `classify`, `model`, `trailing_questions`,
   `toast`, `debug`); the board's default `log` is `~/.config/herdr-app/decisions.md`.
 
@@ -419,6 +455,11 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   branch reuses the worktree instead of failing.
 - With a Linear issue and an empty message, the agent's first message is `Start working on the Linear issue X.` plus a
   Context block, and the branch is the issue's `branchName`.
+- With `LINEAR_API_KEY`, the first column lists your Todo issues. Dragging one onto Perpétuo lights nothing and it goes
+  back; onto Planning it opens `Start <ID>?`; E then Esc returns to it; Esc closes everything and the issue stays.
+  ⏎ starts a worktree on Linear's branch name with the column's skill; the card shows `↗ <ID>` and the issue leaves
+  the column. Onto In progress, the issue is In Progress in Linear within a minute.
+- A Planning card whose worktree has `tmp/<ID>/plan/report.md` shows `📄 Plan ready`, which opens it as a page.
 - ⌘W on a worktree's last tab opens Remove worktree; after it, `git worktree list` no longer has it and the branch
   remains.
 - A clean worktree in Done with its time 3 days back is removed within a minute (space closed, branch kept, a toast); one

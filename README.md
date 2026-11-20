@@ -3,7 +3,7 @@
 ![Board (Herdr)](preview.png)
 
 A layout for the [Herdr](https://herdr.dev) desktop app. Each git worktree you work in is a card on a Linear-style board,
-in a stage you choose: Perpétuo (the agents you always keep open), Todo, In progress, In review, Watch, Temp, Done,
+in a stage you choose: Perpétuo (the agents you always keep open), Planning, In progress, In review, Watch, Temp, Done,
 Archived, Paused. Stages are labels you pick; only two act: Done removes the worktree after 3 days, and Archived puts
 its tabs away. A card shows:
 
@@ -11,7 +11,9 @@ its tabs away. A card shows:
 - its branch, commits, uncommitted lines, pull request and checks;
 - the question an agent is waiting on, with every option in full to click (its column widens to fit them);
 - the machine it is on, when that isn't this one: a tag with the machine's name, such as `devbox`, and
-  `devbox · offline` while Herdr can't reach it.
+  `devbox · offline` while Herdr can't reach it;
+- the Linear issue it was started from (`↗ ENG-12`, which opens it), and in Planning, `📄 Plan ready` once a
+  planning skill wrote its plan (below).
 
 The sidebar lists the worktrees by stage, each with its agents, in the order you drag them to. A click on a worktree
 goes to its main agent, not a sub-agent that agent started.
@@ -26,12 +28,36 @@ goes to its main agent, not a sub-agent that agent started.
 - **New agent** (⌘N) makes a worktree of the shown repo and starts Claude Code or OpenCode in it. The agent's first
   message is yours plus a Context block: a Linear issue (picked from your own when `LINEAR_API_KEY` is set), a pull
   request, a Slack message, any link or note. The card gets the issue's title, the branch gets Linear's branch name.
-- **Orchestrate** (optional): if you have a Claude Code skill that plans and runs work on a Linear issue, name its
-  folder in `~/.config/herdr-app/board.json` as `{ "orchestrate": "<folder in ~/.claude/skills>" }`. New agent with a
-  Linear issue then offers Orchestrate, on unless you untick it. It starts Claude Code in the new worktree on
-  `/<skill> <your message>`, followed by the Context block with the issue. What happens next is up to your skill;
-  any agents it starts in that space with `hc` (herdr-core, the command line that comes with Herdr) show on the card.
-  Without the file, or where the skill isn't installed, the option isn't shown.
+- **A Linear column** (with `LINEAR_API_KEY`): the board's first column lists your Linear issues in Todo (assigned to
+  you, not started). Drag one onto **Planning** or **In progress**: a short summary asks `Start ENG-12?` with the
+  machine, agent and repo of your last New agent, the branch Linear suggests and the skill that column runs. ⏎ starts
+  it (a worktree, the agent, the skill), E opens New agent with all of it filled in to change anything or add a first
+  message, Esc cancels and nothing changes. Started onto In progress, the issue moves to In Progress in Linear; that
+  is the only thing the board ever writes there. An issue that has a worktree shows as that worktree's card, never
+  twice: the board knows it from the start, or from the issue ID at the start of the branch name. Only cards from the
+  Linear column start anything; moving a worktree between stages only changes its label.
+- **Skills** (optional): name the Claude Code skills you use on Linear issues in `~/.config/herdr-app/board.json`:
+
+  ```json
+  {
+    "skills": ["orchestrator", "plan-skill", "build-skill"],
+    "stageSkills": { "todo": "plan-skill", "in_progress": "orchestrator" },
+    "issueArg": ["plan-skill", "build-skill"],
+    "skillFlags": { "build-skill": "--sync-repos" }
+  }
+  ```
+
+  - `skills`: what New agent offers, among those installed in `~/.claude/skills` or the repo's `.claude/skills`.
+  - `stageSkills`: the skill a Linear card dropped on that column runs (`todo` is Planning).
+  - `issueArg`: skills that take the issue ID as their first argument (`/plan-skill ENG-12`).
+  - `skillFlags`: flags always passed to a skill.
+
+  The agent starts as Claude Code on `/<skill> [ID] [flags] <your message>`, then the Context block with the issue;
+  with an issue the message is optional. Where a column's skill isn't installed, the summary says so and won't start.
+  Without the file, New agent and the Linear column work with no skill. The older `{ "orchestrate": "<skill>" }`
+  still works.
+- **Plans**: a card in Planning shows `📄 Plan ready` when its worktree has `tmp/<ID>/plan/report.md` (or
+  `report.html`), as a planning skill may write. A click opens it in the browser, the Markdown as a readable page.
 - **Asks** (⌘⇧A): every question your agents ask, answered from the card or the panel without opening the terminal.
   This covers permission prompts, menus of options and turns that end with a plain-text question. It is built on
   [herdr-agent-ask](https://github.com/sachin-philip/herdr-agent-ask).
@@ -52,9 +78,9 @@ goes to its main agent, not a sub-agent that agent started.
   - `leftover worktrees · clean up` lists the ones a closed space left behind.
   - A removal keeps the branch and its commits.
 - **Keyboard first**, like Linear:
-  - ↑↓←→ / hjkl to move, 1–9 to jump to a stage;
+  - ↑↓←→ / hjkl to move, 1–9 to jump to a stage, 0 to the Linear column;
   - S to change the stage, ⇧←→ to move it one stage;
-  - ⏎ to open the agent, Space to peek at it, F for Focus;
+  - ⏎ to open the agent (on a Linear issue: start it), Space to peek at it, F for Focus;
   - Y to answer with the recommended option, R for the Asks panel;
   - N for a new agent, M to merge or ship the PR, / to search, ? for every key.
 
@@ -99,7 +125,9 @@ Mods are trusted code. This one:
   agent's last message to Anthropic through your own Claude Code login**, a few seconds and under a cent per call. Set
   `"trailing_questions": false` (dialogs only) or `"classify": "off"` (never) in `~/.config/herdr-app/asks.json` to
   limit or stop it;
-- reads `LINEAR_API_KEY` from your login shell, if it is set, and sends it only to `api.linear.app`;
+- reads `LINEAR_API_KEY` from your login shell, if it is set, and sends it only to `api.linear.app`: to read your
+  issues and projects, and to move an issue you started onto In progress to its team's started state;
+- writes the plans it opens as pages under `~/.config/herdr-app/cache/plans/`;
 - appends each answer to `~/.config/herdr-app/decisions.md`. The `log` setting in `asks.json` changes that file; a file
   inside the repo would leave every worktree dirty, and Done would never remove it.
 

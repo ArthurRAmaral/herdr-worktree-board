@@ -5,26 +5,30 @@
 // the sidebar: + New agent, Board, who needs you, then every worktree grouped by stage, in the order you drag them to,
 // its agents under it; a click goes to the worktree's main agent, not a sub-agent it started there, or straight to an
 // agent, a right-click moves the worktree to another stage), "board"
-// (today's numbers, the next move, project chips and one column per stage) and "bottom" (when the board last read, any
-// git or gh problem, the clock). "new" is the New agent dialog: a new worktree of the shown repo with the agent in it,
+// (today's numbers, the next move, project chips, with LINEAR_API_KEY a Linear column of your issues waiting to start,
+// then one column per stage) and "bottom" (when the board last read, any git, gh or Linear problem, the clock). "new"
+// is the New agent dialog: a new worktree of the shown repo with the agent in it,
 // or one more agent in a worktree, started on your message plus a Context block of the references you add (a Linear
-// issue, picked from yours when LINEAR_API_KEY is set, a pull request, a Slack message, any link or note); with a
-// Linear issue and an orchestrator skill (board.json's "orchestrate", installed), Orchestrate (on unless you untick it)
-// starts Claude Code on `/<skill> <your message>` and the Context, so its agents land in that worktree's space; "stage" is
+// issue or project, picked from Linear when LINEAR_API_KEY is set, a pull request, a Slack message, any link or note);
+// with skills (board.json's "skills", installed for the machine and repo), the skill row (its stage's skill when
+// opened from a Linear card, else the in-progress one with a Linear issue or project, yours to pick) starts Claude Code
+// on `/<skill> …` and the Context, so its agents land in that worktree's space; "stage" is
 // the stage picker; "cleanup" lists the worktrees left without a space, to open or remove. ⌘W (keys.json,
 // board-herdr.close) on a worktree's last tab opens Herdr's own Remove worktree, so closed tasks don't pile up on disk. Both give the keyboard back to the board when they
 // close (Herdr only does that for focusable mods).
-// Two things kept apart: a worktree's stage (Perpétuo, Todo, In progress, In review, Watch, Temp, Done, Archived, Paused), which
+// Two things kept apart: a worktree's stage (Perpétuo, Planning, In progress, In review, Watch, Temp, Done, Archived, Paused), which
 // only you change (the stage picker, S, or dragging its card to another column), kept in shared state by space (Done removes the worktree after 3 days there, unless it has
 // uncommitted changes); and each agent's status (working, waiting for you, done, idle), which the
 // agent reports and the board only shows. A card suggests the next stage when its pull request says so (opened: In
 // review; merged: Archived) but never moves by itself. Archived also puts the worktree's tabs away (tab.settle).
 // The board and the sidebar show the worktrees of the shown space's repo, or every one (V on the board), and say when
 // an agent elsewhere needs you.
-// Keyboard, like Linear's: ↑↓/jk within a column, ←→/hl across columns, 1-9 a column, S the stage, ⇧←→ the stage
-// before or after, ⏎ opens the worktree's agent, Space peeks at it beside the board, N a new worktree, ⇧N one more agent
-// in this one, / searches, ? lists every key; ⌘E (keys.json, board-herdr.toggle) goes from an agent to the board and
-// back.
+// A Linear card dragged onto Planning or In progress (or S, or ⏎ for In progress) opens a short summary of the start;
+// only its ⏎ makes the worktree and the agent, and Esc changes nothing.
+// Keyboard, like Linear's: ↑↓/jk within a column, ←→/hl across columns, 0 the Linear column, 1-9 a stage, S the stage,
+// ⇧←→ the stage before or after, ⏎ opens the worktree's agent, Space peeks at it beside the board, N a new worktree,
+// ⇧N one more agent in this one, / searches, ? lists every key; ⌘E (keys.json, board-herdr.toggle) goes from an agent
+// to the board and back.
 // Data: spaces() and agents(); terminals() for the sub-agents; git in each worktree's folder for its repo, branch,
 // commits ahead of the default branch, uncommitted files and +added −removed; gh for the branch's pull request and
 // checks, and for what you merged this week. Merge PR runs `gh pr merge`, Ship PR runs `git push -u origin HEAD && gh
@@ -47,14 +51,16 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle, Popup } from "gpui-base";
 import { spaces, agents, panes, run, props, exec, shared, setShared, window, nextCommand, layout, openOverlay, closeOverlay,
-  knownAgents, home, focused, setAgentOrder, terminals, notify, machines, readTextFile, appHome } from "herdr";
+  knownAgents, home, focused, setAgentOrder, terminals, notify, machines, readTextFile, writeTextFile, appHome } from "herdr";
 import { Engine } from "./asks-engine.js";
 import { loadConfig } from "./asks-state.js";
 import { AsksPanel, Answerer, pickable, waitingAsks, questionsOf } from "./asks.js";
 import { PrsFeed, PRS, PR_ASK, PR_DRAFTS } from "./prs-data.js";
 import { PrsBoard, PrsSettings, PRS_SHOWN } from "./prs.js";
 import { lanes } from "./prs-rules.js";
+import { planPage } from "./md-html.js";
 import { mainAgent, addNew, moveKey, toFront, byOrder, seq } from "./nav-order.js";
+import { readBoardConfig, firstMessage, moveInLinear, todoColumn, canDrop, issueFromBranch, startedState } from "./linear-rules.js";
 
 const MOD = "board-herdr";
 const C = {
@@ -67,7 +73,7 @@ const C = {
 // the stages a worktree goes through, in order: the board's columns and the sidebar's groups
 const STAGES = [
   ["perpetual", "Perpétuo", "#c084fc"], // agents you always keep open: nothing nudges them out
-  ["todo", "Todo", "#8a8f98"],
+  ["todo", "Planning", "#8a8f98"], // work being planned, not yet carried on (the key stays todo)
   ["in_progress", "In progress", "#e6b422"],
   ["in_review", "In review", "#3ec9b4"],
   ["watch", "Watch", "#7d8590"],
@@ -94,6 +100,9 @@ const SANS = "Geist";
 const GIT_MS = 10000; // how often each worktree's folder is read with git (also when an agent changes status)
 const GH_MS = 60000; // how often each branch's pull request is asked of GitHub
 const WEEK_MS = 300000; // how often the merged pull requests of the week are counted
+const LINEAR_MS = 60000; // how often the Linear column asks Linear for your issues waiting to start
+const LINEAR_WAIT = 20000; // how long a Linear request may take before it's given up
+const KEY_BACKOFF = [300000, 900000, 3600000]; // with no key, the waits before looking it up again (then hourly)
 const ASK_MS = 5000; // how often the questions of blocked agents are read off their screens
 const CONFIRM = new Set(["land", "ship"]); // asked on the card first
 const LABEL = { land: "Merge PR", ship: "Ship PR" };
@@ -107,6 +116,7 @@ const COUNTS = "boardh.counts"; // shared: what the top bar counts
 const REPOS = "boardh.repos"; // shared: space id -> {common, name}: its repo, for the sidebar's repo filter
 const STAY = "boardh.stay"; // shared: when New agent made a space with a first message (ms): the top bar keeps the board
 const PICK = "boardh.agent"; // shared: the agent New agent last started
+const LAST = "boardh.last"; // shared: {machine, agent, repo}: where and with what New agent last started, from either door
 // what New agent offers, until knownAgents() says how this machine runs them and whether they're installed
 const NEW_AGENTS = [
   { key: "claude", name: "Claude Code", icon: "icons/claude.svg", tint: false, run: ["claude"], installed: null },
@@ -127,6 +137,11 @@ const SPACE_STAGES = "boardh.spaceStages"; // shared: space id -> its stage
 const STAGE_AT = "boardh.stageAt"; // shared: space id -> when it last changed stage (ms): Done's 3 days count from it
 const SPACE_TITLES = "boardh.spaceTitles"; // shared: space id -> the title New agent gave its worktree
 const BRANCHES = "boardh.branches"; // shared: [{space, project, branch}]: each worktree's branch, for the PRs view's ⌁
+const STARTING = "boardh.starting"; // shared: Linear issue ID -> when its start was confirmed (ms): the column hides it while Linear catches up
+const LINEAR_ORG = "boardh.linearOrg"; // shared: {urlKey, teamKeys}: your Linear workspace, as the board last read it
+const SPACE_ISSUES = "boardh.spaceIssues"; // shared: space id -> {id, url}: the Linear issue its worktree was started for
+const LINEAR_MOVES = "boardh.linearMoves"; // shared: [{uuid, teamId, id, at}]: issues New agent started in progress, for the board to move in Linear
+const MOVE_MS = 600000; // a queued move older than this is dropped, not made late
 
 // one call per folder: the repo, its branch, how far it is from the default branch, and what's uncommitted
 const GIT = `cd "$1" 2>/dev/null || exit 3
@@ -140,17 +155,24 @@ if [ -n "$base" ]; then
   mb=$(git merge-base "$base" HEAD 2>/dev/null)
   if [ -n "$mb" ]; then echo "ahead=$(git rev-list --count "$mb"..HEAD)"; echo "diff=$(git diff --shortstat "$mb" 2>/dev/null)"; fi
 fi
-echo "unpushed=$(git rev-list --count @{u}..HEAD 2>/dev/null)"`;
+echo "unpushed=$(git rev-list --count @{u}..HEAD 2>/dev/null)"
+# the newest plan a planning skill left in the worktree (tmp/<issue>/plan/report.*), its HTML when it wrote one
+r=$(git rev-parse --show-toplevel)
+f=$(ls -t "$r"/tmp/*/plan/report.md "$r"/tmp/*/plan/report.html 2>/dev/null | head -n 1)
+[ -n "$f" ] && [ -f "\${f%/*}/report.html" ] && f="\${f%/*}/report.html"
+echo "plan=$f"`;
 
 // New agent's: the repo a folder is in, the branch a new worktree starts from, and the home the worktrees go under
 // a reference New agent puts in the agent's first message: what it is, from what you paste
-const REF_KINDS = { linear: ["Linear issue", "#8b93f8"], pr: ["Pull request", "#53cf91"], slack: ["Slack message", "#e88cc8"],
+const REF_KINDS = { linear: ["Linear issue", "#8b93f8"], project: ["Linear project", "#b48cf2"], pr: ["Pull request", "#53cf91"], slack: ["Slack message", "#e88cc8"],
   link: ["Link", "#6fb3f2"], note: ["Note", "#8a898e"] };
 function classify(raw) {
   const s = raw.trim();
   let m;
   if (!s) return null;
   if ((m = /linear\.app\/[^/\s]+\/issue\/([A-Za-z][A-Za-z0-9]*-\d+)/.exec(s))) return { kind: "linear", id: m[1].toUpperCase(), url: s };
+  // a project's link ends in its name and its slug id: linear.app/<workspace>/project/<name>-<slugId>
+  if ((m = /linear\.app\/[^/\s]+\/project\/([^/\s?#]+)/.exec(s))) return { kind: "project", id: m[1].split("-").pop(), url: s, title: null };
   if ((m = /^([A-Za-z][A-Za-z0-9]*-\d+)$/.exec(s))) return { kind: "linear", id: m[1].toUpperCase(), url: null };
   if ((m = /github\.com\/([^/\s]+\/[^/\s]+)\/pull\/(\d+)/.exec(s))) return { kind: "pr", id: `${m[1]}#${m[2]}`, url: s };
   if (/slack\.com\/archives\//.test(s)) return { kind: "slack", id: "", url: s };
@@ -160,19 +182,69 @@ function classify(raw) {
 // how a reference reads in the first message
 function refLine(r) {
   if (r.kind === "linear") return `- Linear issue: ${r.id}${r.title ? ` — ${r.title}` : ""}${r.url ? ` (${r.url})` : ""}`;
+  if (r.kind === "project") return `- Linear project: ${r.title ?? r.id}${r.url ? ` (${r.url})` : ""}`;
   if (r.kind === "pr") return `- Pull request: ${r.id} (${r.url})`;
   if (r.kind === "note") return `- Note: ${r.id}`;
   return `- ${REF_KINDS[r.kind][0]}: ${r.url}`;
 }
 const LINEAR_ISSUE = "identifier title url branchName state { name }";
-// the Linear API with your key (it never leaves this machine but for api.linear.app)
-async function linear(key, query, variables) {
-  const r = await fetch("https://api.linear.app/graphql", {
-    method: "POST", headers: { "Content-Type": "application/json", Authorization: key }, body: JSON.stringify({ query, variables }),
+const LINEAR_PROJECT = "name url slugId status { name }";
+const OPEN_PROJECTS = `projects(first: 50, orderBy: updatedAt, filter: { status: { type: { nin: ["completed", "canceled"] } } }) { nodes { ${LINEAR_PROJECT} } }`;
+// a Linear project picked from the list, as a reference
+const projectRef = (p) => ({ kind: "project", id: p.slugId, url: p.url, title: p.name });
+// the Linear API with your key (it never leaves this machine but for api.linear.app); Herdr's fetch can't be
+// aborted, so a request that hangs is given up after LINEAR_WAIT and the caller's run ends with the reason
+async function linear(cx, key, query, variables) {
+  const j = await new Promise((resolve, reject) => {
+    cx.sleep(LINEAR_WAIT).then(() => reject(new Error("Linear didn't answer")), () => {});
+    fetch("https://api.linear.app/graphql", {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: key }, body: JSON.stringify({ query, variables }),
+    }).then((r) => r.json()).then(resolve, reject);
   });
-  const j = await r.json();
   if (j.errors?.length) throw new Error(j.errors[0].message);
   return j.data;
+}
+// your LINEAR_API_KEY: from Herdr's environment, else from your login shell (only the key is kept from what it
+// prints, and it's never shown); null without one
+async function linearKey() {
+  let r = await exec("sh", ["-c", 'printf %s "$LINEAR_API_KEY"']);
+  let key = /lin_api_[A-Za-z0-9]+/.exec(r.stdout ?? "")?.[0];
+  if (!key) {
+    r = await exec("sh", ["-c", 'exec "${SHELL:-/bin/zsh}" -lic "$1"', "sh", 'printf "\n%s\n" "$LINEAR_API_KEY"'], { timeout: 8000 });
+    key = /lin_api_[A-Za-z0-9]+/.exec(r.stdout ?? "")?.[0];
+  }
+  return key ?? null;
+}
+// the Linear column: your issues waiting to start (by the state's type, whatever the team calls it), and the
+// workspace's URL key and team keys, to know an issue's ID in a branch name and link to it
+const LINEAR_TODO = `{ viewer { assignedIssues(first: 100, orderBy: updatedAt, filter: { state: { type: { eq: "unstarted" } } }) {
+    nodes { id identifier title url branchName priorityLabel state { type } team { id key name } project { name } } } }
+  organization { urlKey } teams { nodes { key } } }`;
+// a team's workflow states, to find its first "started" one; and the one write: an issue's state
+const TEAM_STATES = "query($t: String!) { team(id: $t) { states { nodes { id type position } } } }";
+const MOVE_ISSUE = "mutation($id: String!, $s: String!) { issueUpdate(id: $id, input: { stateId: $s }) { success } }";
+// a Linear card's issue, as the summary (startIssue) takes it
+const issueRef = (i) => ({ id: i.identifier, url: i.url, title: i.title, branchName: i.branchName, uuid: i.id, teamId: i.team?.id });
+// a worktree's Linear issue: the one it was started for, else an ID of one of your teams in its branch; null: none
+// a plan opened in the browser: an HTML one on this computer as it is; else (Markdown, or from another machine) a page
+// written under ~/.config/herdr-app/cache/plans, Markdown made readable
+async function openPlan(path, on, title) {
+  if (!on && path.endsWith(".html")) { await exec("open", [path]); return; }
+  const text = await readTextFile(path, { on });
+  if (text === null) throw new Error(`${path} is gone`);
+  const dir = `${appHome()}/cache/plans`;
+  const out = `${dir}/${`${on ?? "local"}${path}`.replace(/[^\w.-]+/g, "-").replace(/^-+/, "")}${path.endsWith(".html") ? "" : ".html"}`;
+  await exec("mkdir", ["-p", dir]);
+  await writeTextFile(out, path.endsWith(".html") ? text : planPage(title, text), await readTextFile(out));
+  await exec("open", [out]);
+}
+
+function issueOf(spaceId, branch) {
+  const kept = (shared(SPACE_ISSUES) ?? {})[spaceId];
+  if (kept) return kept;
+  const org = shared(LINEAR_ORG);
+  const id = issueFromBranch(branch, org?.teamKeys ?? []);
+  return id && org?.urlKey ? { id, url: `https://linear.app/${org.urlKey}/issue/${id}` } : null;
 }
 
 const REPO = `cd "$1" 2>/dev/null || exit 3
@@ -240,6 +312,7 @@ function parseGit(stdout) {
     ahead: int(v.ahead),
     unpushed: int(v.unpushed),
     lines: v.diff ? { added: ins ? Number(ins[1]) : 0, removed: del ? Number(del[1]) : 0 } : null,
+    plan: v.plan || null,
   };
 }
 
@@ -420,16 +493,19 @@ function worktreeOn(repo, branch) {
   return (list.find((b) => b.project === repo) ?? (list.length === 1 ? list[0] : null))?.space ?? null;
 }
 
-// New agent with a Linear issue: Claude Code starts on your orchestrator skill (its defaults: no arguments), your
-// message and the issue, and the skill puts its agents in the new worktree's space, its own. The skill is yours to
-// name, in ~/.config/herdr-app/board.json ({ "orchestrate": "<skill folder in ~/.claude/skills>" }); without it, or
-// where the skill isn't installed, Orchestrate isn't offered
-async function orchestrateSkill() {
+// New agent's skills: Claude Code starts on `/<skill>` (with the issue and flags board.json gives it), your message and
+// the Context. Which skills, and which one each stage runs, are yours to name in ~/.config/herdr-app/board.json
+// ({ skills, stageSkills, issueArg, skillFlags }, or the old { orchestrate }); without it no skill is offered
+async function boardConfig() {
   try {
-    const name = JSON.parse(await readTextFile(`${appHome()}/board.json`))?.orchestrate;
-    return typeof name === "string" && /^[\w.-]+$/.test(name) ? name : null;
-  } catch { return null; } // no board.json
+    return readBoardConfig(JSON.parse(await readTextFile(`${appHome()}/board.json`)));
+  } catch { return readBoardConfig(null); } // no board.json
 }
+// the skills ($2…) installed for the repo at $1: a SKILL.md in ~/.claude/skills/<name>/ or the repo's .claude/skills/<name>/
+const SKILLS = `TOP="$1"; shift
+for s in "$@"; do
+  if test -f "$HOME/.claude/skills/$s/SKILL.md" || { test -n "$TOP" && test -f "$TOP/.claude/skills/$s/SKILL.md"; }; then echo "$s"; fi
+done`;
 
 // how to start an agent on a first message: Herdr's task puts it last on the command line, as Claude Code takes it;
 // OpenCode's first argument is a folder, so it gets --prompt
@@ -437,12 +513,29 @@ const launch = (a, task) => (!task ? { argv: a.run } : a.key === "opencode" ? { 
 
 // New agent: a new worktree of the shown repo, or (space) one more agent in that worktree
 const newAgent = (space) => openOverlay({ mod: MOD, props: { part: "new", space: space ?? null }, kind: "dialog", width: 540, height: 770 });
+// a Linear card's start: New agent's short summary (⏎ starts, E the full dialog, Esc nothing), on the machine, agent and
+// repo of the last start, else the shown space's (a start outside git remembered no repo: nothing to go on)
+function startIssue(issue, stage) {
+  const last = shared(LAST), s = activeSpace();
+  const from = last?.repo?.main ? { machine: last.machine ?? null, dir: last.repo.main, agent: last.agent }
+    : { machine: s?.machine ?? null, dir: null };
+  return openOverlay({ mod: MOD, kind: "dialog", width: 420, height: 330,
+    props: { part: "new", summary: true, fromLinear: true, issue, stage, ...from } });
+}
+// E in the summary: the same start in the full New agent dialog, to change any of it (its Esc comes back to the summary)
+function editIssue(p) {
+  const { overlay, ...rest } = p;
+  closeOverlay(overlay);
+  // a bit taller than New agent: it may offer the shown space's repo under WHERE
+  return openOverlay({ mod: MOD, kind: "dialog", width: 540, height: 802, props: { ...rest, summary: false, wasSummary: true } });
+}
 
-// the stage picker: at the pointer for a click, centered for a key
-function openStagePicker(space, title, stage, pointer) {
-  const deletable = Boolean(spaces().find((s) => s.id === space && isWorktree(s)));
-  openOverlay({ mod: MOD, props: { part: "stage", space, title, stage, deletable }, kind: pointer ? "popup" : "dialog",
-    width: 250, height: 44 + STAGES.length * 30 + (deletable ? 40 : 0) });
+// the stage picker: at the pointer for a click, centered for a key; for a Linear card (issue), only the stages it can
+// start in (only), and a pick opens its summary
+function openStagePicker(space, title, stage, pointer, { only, issue } = {}) {
+  const deletable = !issue && Boolean(spaces().find((s) => s.id === space && isWorktree(s)));
+  openOverlay({ mod: MOD, props: { part: "stage", space, title, stage, deletable, only, issue }, kind: pointer ? "popup" : "dialog",
+    width: 250, height: 44 + (only?.length ?? STAGES.length) * 30 + (deletable ? 40 : 0) });
 }
 
 // Delete worktree: Herdr's own Remove worktree (it warns about uncommitted changes, closes the space and runs git
@@ -618,6 +711,8 @@ export default class Board extends View {
     this.offGithub = new Set(); // repos (git common dir) whose remotes aren't on GitHub
     this.merged = []; // closedAt (ms) of my pull requests merged in the last 7 days
     this.problem = null; // the last git or gh error
+    this.linearProblem = null; // the last Linear move that failed: "<ID> not moved in Linear: <reason>"
+    this.moving = false; // a moveIssues run is under way
     this.offline = []; // the machines Herdr couldn't reach on the last read
     this.reading = false;
     this.lastRead = 0;
@@ -629,7 +724,9 @@ export default class Board extends View {
     this.focus = false;
     this.peek = false; // Space: the selected worktree's agent beside the board, following the selection
     this.help = false; // ?: every key
-    this.scroll = STAGES.map(() => ScrollHandle.new()); // each column's list, to keep the selected card in view
+    // each column's list (the Linear one's too), to keep the selected card in view
+    this.scroll = Object.fromEntries([["linear"], ...STAGES].map(([k]) => [k, ScrollHandle.new()]));
+    this.linear = { issues: [], error: null, at: 0 }; // the Linear column's last good read, and why the last one failed
     this.panX = 0; // how far the columns are scrolled sideways (px): a drag on the background, the wheel, the trackpad
     this.pan = null; // a drag on the background: {x, from, moved}
     this.folded = new Set(["archived"]); // columns drawn as just their header
@@ -658,6 +755,7 @@ export default class Board extends View {
     cx.timer.every(1000, (cx) => this.tick(cx));
     cx.timer.every(ASK_MS, (cx) => this.readAsks(cx));
     cx.timer.every(WEEK_MS, (cx) => this.readWeek(cx));
+    cx.timer.every(LINEAR_MS, (cx) => this.readLinear(cx));
     cx.timer.every(60000, (cx) => this.sweepDone(cx));
     cx.timer.every(30000, (cx) => { this.now = Date.now(); cx.notify(); });
   }
@@ -677,6 +775,7 @@ export default class Board extends View {
   }
 
   tick(cx) {
+    if ((shared(LINEAR_MOVES) ?? []).length) this.moveIssues(cx);
     const sig = agents().map((a) => `${a.address}:${a.status}`).join(" ") + "|" + spaces().map((s) => `${s.id}:${place(s)}`).join(" ");
     if (sig !== this.sig) {
       this.sig = sig;
@@ -686,6 +785,7 @@ export default class Board extends View {
 
   // git in every worktree's folder, then gh for the branches whose pull request is due
   refresh(cx, force) {
+    if (force) this.readLinear(cx, true);
     if (this.reading) return;
     this.reading = true;
     cx.spawn(async (cx) => {
@@ -766,14 +866,79 @@ export default class Board extends View {
     });
   }
 
+  // the Linear column's issues (with LINEAR_API_KEY), and your workspace's URL key and team keys; a failed read keeps
+  // the last good one and says why in the bottom bar. A found key is kept; a missing one is looked up once per board
+  // start, again on a forced refresh, and otherwise after 5 minutes, 15, then hourly (the lookup runs a login shell)
+  readLinear(cx, force) {
+    if (this.linearReading) return;
+    this.linearReading = true;
+    cx.spawn(async (cx) => {
+      try {
+        const wait = KEY_BACKOFF[Math.min(this.lkeyMisses ?? 0, KEY_BACKOFF.length) - 1] ?? 0;
+        if (!this.lkey && (force || this.lkey === undefined || Date.now() - this.lkeyAt > wait)) {
+          this.lkeyAt = Date.now();
+          this.lkey = await linearKey();
+          this.lkeyMisses = this.lkey ? 0 : (this.lkeyMisses ?? 0) + 1;
+        }
+        if (!this.lkey) return;
+        const d = await linear(cx, this.lkey, LINEAR_TODO);
+        this.linear = { issues: d.viewer.assignedIssues.nodes, error: null, at: Date.now() };
+        const org = { urlKey: d.organization.urlKey, teamKeys: d.teams.nodes.map((t) => t.key) };
+        if (JSON.stringify(org) !== JSON.stringify(shared(LINEAR_ORG) ?? null)) setShared(LINEAR_ORG, org);
+      } catch (e) {
+        if (this.lkey) this.linear = { ...this.linear, error: String(e.message ?? e) };
+      } finally { this.linearReading = false; }
+      this.share();
+      cx.notify();
+    });
+  }
+
+  // the issues New agent started in progress move to their team's first "started" state; each queued entry is taken off
+  // whether it moved or not (one try), and a failure shows in the bottom bar
+  moveIssues(cx) {
+    if (this.moving || this.lkey === undefined) return; // one run at a time; the key's first lookup comes first
+    this.moving = true;
+    cx.spawn(async (cx) => {
+      const queue = shared(LINEAR_MOVES) ?? [];
+      let problem = null;
+      try {
+        for (const m of queue) {
+          try {
+            if (!this.lkey) throw new Error("no LINEAR_API_KEY");
+            if (Date.now() - m.at > MOVE_MS) throw new Error("queued over 10 minutes ago");
+            const d = await linear(cx, this.lkey, TEAM_STATES, { t: m.teamId });
+            const state = startedState(d.team?.states?.nodes ?? []);
+            if (!state) throw new Error("its team has no started state");
+            const r = await linear(cx, this.lkey, MOVE_ISSUE, { id: m.uuid, s: state.id });
+            if (r.issueUpdate?.success !== true) throw new Error("Linear didn't accept the update");
+          } catch (e) { problem = `${m.id} not moved in Linear: ${String(e.message ?? e)}`; }
+        }
+      } finally {
+        // what was taken goes, entries queued meanwhile stay
+        const done = new Set(queue.map((m) => `${m.uuid}|${m.at}`));
+        setShared(LINEAR_MOVES, (shared(LINEAR_MOVES) ?? []).filter((m) => !done.has(`${m.uuid}|${m.at}`)));
+        this.moving = false;
+      }
+      this.linearProblem = problem;
+      this.share();
+      cx.notify();
+      this.readLinear(cx);
+    });
+  }
+
   // what the top bar and the sidebar need from git: the count, and each space's repo; written only when it changed
   share() {
     const cards = this.cards;
     const counts = { tasks: cards.filter((t) => t.stage !== "archived").length, needs: cards.reduce((n, t) => n + t.needs.length, 0),
-      when: new Date().toTimeString().slice(0, 5), problem: this.problem, offline: this.offline };
+      when: new Date().toTimeString().slice(0, 5), problem: this.problem, offline: this.offline, linear: this.linear.error,
+      linearProblem: this.linearProblem };
     if (JSON.stringify(counts) !== JSON.stringify(shared(COUNTS) ?? {})) setShared(COUNTS, counts);
     const repos = Object.fromEntries(cards.filter((t) => t.git).map((t) => [t.key, { common: t.git.common, name: t.git.project }]));
     if (JSON.stringify(repos) !== JSON.stringify(shared(REPOS) ?? {})) setShared(REPOS, repos);
+    // a space that no longer exists drops its issue link (no spaces at all: Herdr is still starting, keep them)
+    const kept = shared(SPACE_ISSUES) ?? {}, live = new Set(spaces().map((s) => s.id));
+    const alive = Object.fromEntries(Object.entries(kept).filter(([id]) => live.has(id)));
+    if (live.size && Object.keys(alive).length !== Object.keys(kept).length) setShared(SPACE_ISSUES, alive);
     const branches = cards.filter((t) => t.git?.branch).map((t) => ({ space: t.key, project: t.git.project, branch: t.git.branch }));
     if (JSON.stringify(branches) !== JSON.stringify(shared(BRANCHES) ?? [])) setShared(BRANCHES, branches);
   }
@@ -881,7 +1046,7 @@ export default class Board extends View {
     cx.notify();
   }
 
-  // a nudge, never a move: an open pull request on a card still in Todo or In progress, or a merged one not archived
+  // a nudge, never a move: an open pull request on a card still in Planning or In progress, or a merged one not archived
   nudge(t) {
     if (t.pr?.state === "OPEN" && (t.stage === "todo" || t.stage === "in_progress")) return "in_review";
     if (t.pr?.state === "MERGED" && t.stage !== "archived" && t.stage !== "perpetual") return "archived";
@@ -890,19 +1055,43 @@ export default class Board extends View {
 
   // ---- moving around ------------------------------------------------------------------------------------------
 
-  // the cards the board shows, column by column: the repo, project and search filters, in your order
+  // the board's columns: the Linear one first when you have a LINEAR_API_KEY, then the stages
+  linearCols() { return this.lkey ? [["linear", "Linear · Todo", "#8b93f8"], ...STAGES] : STAGES; }
+
+  // the Linear column's cards ({key: "linear:<ID>", issue}): your issues waiting to start, minus those a worktree
+  // already is (on any card, whatever the filters) and those just started
+  linearList(cards = this.cards) {
+    const linked = new Set(cards.map((t) => issueOf(t.key, t.branch)?.id).filter(Boolean));
+    return todoColumn(this.linear.issues, { linked, starting: shared(STARTING) ?? {}, now: Date.now() })
+      .map((i) => ({ key: `linear:${i.identifier}`, issue: i }));
+  }
+
+  // the selected Linear card's issue (as Linear gives it), else null
+  linearSel() {
+    return this.sel?.startsWith("linear:") ? this.linearList().find((x) => x.key === this.sel)?.issue ?? null : null;
+  }
+
+  // the cards the board shows, column by column (linearCols()): the repo, project and search filters, in your order;
+  // the Linear column only takes the search
   columns() {
     const q = this.query.trim().toLowerCase();
-    const hit = (t) => !q || [t.name, t.branch, t.project, t.space.name, ...t.agents.map((x) => cleanTitle(x.a.title)),
-      ...t.needs.map((x) => this.asks[x.a.address])].some((v) => String(v ?? "").toLowerCase().includes(q));
-    const shown = this.cards.filter((t) => inScope(t.key) && (!this.filter || t.project === this.filter) && hit(t));
+    const has = (list) => !q || list.some((v) => String(v ?? "").toLowerCase().includes(q));
+    const hit = (t) => has([t.name, t.branch, t.project, t.space.name, ...t.agents.map((x) => cleanTitle(x.a.title)),
+      ...t.needs.map((x) => this.asks[x.a.address])]);
+    const cards = this.cards;
+    const shown = cards.filter((t) => inScope(t.key) && (!this.filter || t.project === this.filter) && hit(t));
     // in the order you dragged them to, the same as the sidebar's
     const order = shared(ORDER) ?? [];
-    return STAGES.map(([k]) => byOrder(shown.filter((t) => t.stage === k), (t) => t.key, order));
+    return this.linearCols().map(([k]) => (k === "linear"
+      ? this.linearList(cards).filter(({ issue: i }) => has([i.identifier, i.title, i.team?.name, i.project?.name]))
+      : byOrder(shown.filter((t) => t.stage === k), (t) => t.key, order)));
   }
 
   // what the keys move through: folded columns count as empty
-  navCols() { return this.columns().map((l, i) => (this.folded.has(STAGES[i][0]) ? [] : l)); }
+  navCols() {
+    const lc = this.linearCols();
+    return this.columns().map((l, i) => (this.folded.has(lc[i][0]) ? [] : l));
+  }
 
   visible() { return this.navCols().flat(); }
 
@@ -910,6 +1099,7 @@ export default class Board extends View {
   // selection: in Focus the one waiting for you (else the main one) with the keyboard, else the main one
   pick(cx, key, open) {
     this.sel = key;
+    if (key.startsWith("linear:") && this.peek) this.setPeek(cx, false); // no worktree's agent beside an issue
     const t = this.cards.find((x) => x.key === key);
     const x = this.focus ? t?.needs[0] ?? t?.main : t?.main;
     if (x && (open || this.focus || this.peek)) this.peekAt(cx, x.a.address);
@@ -953,7 +1143,7 @@ export default class Board extends View {
     const cols = this.navCols();
     let c = cols.findIndex((l) => l.some((t) => t.key === this.sel));
     if (c < 0) {
-      const marked = STAGES.findIndex(([k]) => k === this.col);
+      const marked = this.linearCols().findIndex(([k]) => k === this.col);
       c = marked >= 0 && cols[marked].length ? marked : cols.findIndex((l) => l.length);
       if (c >= 0) this.select(cx, cols, c, 0);
       return;
@@ -967,7 +1157,7 @@ export default class Board extends View {
 
   select(cx, cols, c, r) {
     this.reveal(c);
-    this.scroll[c].scroll_to_item(r);
+    this.scroll[this.linearCols()[c][0]].scroll_to_item(r);
     this.pick(cx, cols[c][r].key);
   }
 
@@ -984,17 +1174,23 @@ export default class Board extends View {
     if (to !== this.panX) { this.panX = to; cx.notify(); }
   }
 
-  // 1-9: that column's first card (unfolding it)
-  toColumn(cx, c) {
-    if (!STAGES[c]) return;
-    this.folded.delete(STAGES[c][0]);
+  // 0 (the Linear column), 1-9 (a stage): that column's first card (unfolding it)
+  toColumn(cx, k) {
+    const c = this.linearCols().findIndex(([x]) => x === k);
+    if (c < 0) return;
+    this.folded.delete(k);
     const cols = this.navCols();
     if (cols[c]?.length) this.select(cx, cols, c, 0);
     cx.notify();
   }
 
+  // a drag whose release the board never saw (it happened over an agent, or another view): forgotten, so the next
+  // move over a column doesn't carry the card along
+  cancelDrag() { this.dragCard = null; this.dropCol = null; this.dropNear = null; this.pan = null; }
+
   goTo(cx, t, address) {
     if (!t) return;
+    this.cancelDrag();
     if (this.focus) this.setFocus(cx, false);
     if (this.peek) this.setPeek(cx, false);
     if (address) goToAgent(address); else goToWorktree(t);
@@ -1005,7 +1201,7 @@ export default class Board extends View {
     if (on) {
       this.peek = false; // Focus shows the same block, with the keyboard
       setShared(PEEK, false);
-      const needs = this.visible();
+      const needs = this.visible().filter((x) => !x.issue); // a Linear card has no agent to answer
       const t = task ?? needs.find((x) => x.key === this.sel) ?? needs[0];
       run("layout.show", { id: "focus-term" });
       if (t?.needs.length) {
@@ -1035,11 +1231,19 @@ export default class Board extends View {
 
   // a card dragged onto another column: that stage (as the stage picker would set it), the card stays selected;
   // a card dropped by another one goes above or below it; in an empty part of another column, at its end
+  // a Linear card only opens its summary (Planning or In progress; nothing starts before its ⏎), and stays in its column
   dropCard(cx) {
     const key = this.dragCard, to = this.dropCol, near = this.dropNear;
     this.dragCard = null; this.dropCol = null; this.dropNear = null;
+    if (key?.startsWith("linear:")) {
+      const it = to && canDrop(to) ? this.linearList().find((x) => x.key === key) : null;
+      if (it) startIssue(issueRef(it.issue), to);
+      this.sel = key;
+      cx.notify();
+      return;
+    }
     if (!key || (!to && !near)) return;
-    const end = !near && to ? this.columns()[STAGES.findIndex(([k]) => k === to)].filter((t) => t.key !== key).pop() : null;
+    const end = !near && to ? this.columns()[this.linearCols().findIndex(([k]) => k === to)].filter((t) => t.key !== key).pop() : null;
     if (to) setStage(key, to);
     const place = near ?? (end ? { key: end.key, after: true } : null);
     if (place) {
@@ -1122,7 +1326,8 @@ export default class Board extends View {
       return;
     }
     if (m.platform || m.control || m.alt) return; // ⌘ and ctrl keys stay the app's
-    const t = this.cards.find((x) => x.key === this.sel);
+    // the selected worktree, or (t undefined) the selected Linear card's issue: it only starts (⏎, S) or opens (O)
+    const t = this.cards.find((x) => x.key === this.sel), li = this.linearSel();
     if (this.help && k !== "?" && !(k === "/" && m.shift)) { this.help = false; cx.notify(); if (k === "escape") { cx.stop_propagation(); return; } }
     if (this.confirm && (k === "y" || k === "enter")) { this.confirmYes(cx); cx.stop_propagation(); return; }
     if (this.confirm && (k === "n" || k === "escape")) { this.confirm = null; cx.notify(); cx.stop_propagation(); return; }
@@ -1133,9 +1338,12 @@ export default class Board extends View {
     else if (k === "k" || k === "up") this.step(cx, 0, -1);
     else if (k === "h" || k === "left") this.step(cx, -1, 0);
     else if (k === "l" || k === "right") this.step(cx, 1, 0);
-    else if (/^[1-9]$/.test(k)) this.toColumn(cx, Number(k) - 1);
+    else if (k === "0") this.toColumn(cx, "linear");
+    else if (/^[1-9]$/.test(k)) this.toColumn(cx, STAGES[Number(k) - 1]?.[0]);
     else if ((k === "backspace" || k === "delete") && t) deleteWorktree(t.key);
+    else if (k === "s" && li) openStagePicker(null, li.identifier, null, false, { only: ["todo", "in_progress"], issue: issueRef(li) });
     else if (k === "s" && t) openStagePicker(t.key, t.name, t.stage, false);
+    else if (k === "enter" && li) { if (!e.is_held) startIssue(issueRef(li), "in_progress"); } // a held ⏎ would start it
     else if (k === "enter" && t) this.goTo(cx, t);
     else if (k === "space") this.setPeek(cx, !this.peek);
     else if (k === "f") this.setFocus(cx, !this.focus, t?.needs.length ? t : undefined);
@@ -1146,6 +1354,7 @@ export default class Board extends View {
     else if (k === "r") toggleAsks();
     else if (k === "y" && t && this.recommended(t)) { const [q, o] = this.recommended(t); this.answerer.answer(q, o, cx); }
     else if (k === "m" && this.landMove(t)) this.ask(cx, t, this.landMove(t));
+    else if (k === "o" && li?.url) cx.spawn(async () => { await exec("open", [li.url]); });
     else if (k === "o" && t?.pr?.url) cx.spawn(async () => { await exec("open", [t.pr.url]); });
     else if (k === "n" || k === "c") newAgent();
     else if (k === "v") setShared(SCOPE, allSpaces() ? "repo" : "all");
@@ -1158,8 +1367,10 @@ export default class Board extends View {
   keyList() {
     const KEYS = [
       ["↑ ↓  j k", "move within a column"], ["← →  h l", "move across columns"], ["1 – 9", "first card of a stage"],
+      ["0", "the Linear column"],
       ["S  drag", "change the stage, or the order"], ["⇧← ⇧→", "stage before / after"], ["A", "archive / unarchive"], ["⌫", "delete the worktree"],
-      ["Click", "its agent beside the board"], ["⏎  double-click", "open the worktree's agent"], ["Space", "show / hide the side"],
+      ["Click", "its agent beside the board"], ["⏎  double-click", "open the worktree's agent"],
+      ["⏎ on an issue", "start it"], ["Space", "show / hide the side"],
       ["F", "Focus: answer what needs you"],
       ["Y", "answer with the recommended option"], ["R  ⌘⇧A", "Asks: every question, to answer"],
       ["N  C", "new agent, in a new worktree"], ["⇧N", "one more agent in this worktree"],
@@ -1191,7 +1402,7 @@ export default class Board extends View {
       return this.prsUi.render(cx);
     }
     if (this.part === "prs-settings") return this.prsSet.render(cx);
-    if (this.part === "new") return this.newDialog();
+    if (this.part === "new") return this.summary ? this.summaryDialog() : this.newDialog();
     if (this.part === "stage") return this.stagePicker();
     if (this.part === "cleanup") return this.cleanupDialog();
     if (this.part === "board") return this.board(cx);
@@ -1217,7 +1428,19 @@ export default class Board extends View {
       : kind === "on" ? [C.you, "#1a1300", C.you] : [C.raised, C.text, C.line2];
     return div().id(id).flex_none().px(9).py(3).rounded(5).bg(bg).border(1).border_color(border).text_color(fg)
       .font_family(SANS).text_size(12).cursor_pointer().hover((st) => st.opacity(0.85))
+      // a press here isn't the card's drag: the click below stops the release, which would leave that drag going
+      // (the board still takes the keyboard, as a press anywhere on it does)
+      .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); if (this.part === "board") this.h?.focus(); })
       .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); }).child(label);
+  }
+
+  // a small link on a card (the Linear issue, the plan): a press on it isn't the card's drag, a click isn't its pick
+  linkPill(id, label, color, onClick) {
+    return div().id(id).flex_none().h(20).px(7).flex().items_center().rounded(4).border(1).border_color(`${color}55`)
+      .bg(`${color}14`).cursor_pointer().hover((st) => st.bg(`${color}2a`))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); })
+      .child(mono(10, color, label));
   }
 
   stat(label, value, color, extra, win) {
@@ -1244,6 +1467,7 @@ export default class Board extends View {
     const [, name, color] = stageInfo(t.stage);
     return h_flex().id(`stage-${t.key}`).flex_none().h(20).px(6).gap(5).items_center().rounded(4).border(1)
       .border_color(`${color}55`).bg(`${color}14`).cursor_pointer().hover((st) => st.bg(`${color}2a`))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation()) // not the card's drag (see btn)
       .on_click((_e, cx) => { cx.stop_propagation(); openStagePicker(t.key, t.name, t.stage, true); })
       .child(div().w(7).h(7).rounded(4).bg(color))
       .child(div().font_family(SANS).text_size(11).text_color(C.soft).child(name))
@@ -1264,6 +1488,7 @@ export default class Board extends View {
     const subs = tally(x.subs.map(subStatus));
     return h_flex().id(`cl-${a.address}`).w_full().h(24).px(4).gap(7).items_center().rounded(4).cursor_pointer()
       .hover((st) => st.bg(C.raised))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation()) // not the card's drag (see btn)
       .on_click((e, cx) => {
         cx.stop_propagation();
         if (e.click_count === 2) { this.goTo(cx, t, a.address); return; }
@@ -1304,6 +1529,7 @@ export default class Board extends View {
     const nudge = this.nudge(t);
     const openPr = pr ? (el) => el.child(this.btn(`pr-${t.key}`, `PR #${pr.number} ↗`, "plain", (cx) => cx.spawn(async () => { await exec("open", [pr.url]); }))) : (el) => el;
     const subs = t.subs.map(subStatus);
+    const iss = issueOf(t.key, t.branch);
     const left = this.doneLeft(t);
     if (left !== null) facts.push(g?.dirty ? ["uncommitted: won't auto-delete", C.you] : [left ? `deletes in ${dur(left)}` : "deleting…", C.muted]);
 
@@ -1347,7 +1573,7 @@ export default class Board extends View {
       // a drag over another card lands above or below it (a line shows where), in its column
       .on_mouse_down("left", () => { this.dragCard = t.key; this.dropCol = null; this.dropNear = null; })
       .on_mouse_move((e, cx) => {
-        if (!this.dragCard) return;
+        if (!this.dragCard || this.dragCard.startsWith("linear:")) return; // a Linear card has no place among them
         const n = t.key === this.dragCard ? null : { key: t.key, after: e.local_position.y > e.bounds.height / 2 };
         if (JSON.stringify(n) !== JSON.stringify(this.dropNear)) { this.dropNear = n; cx.notify(); }
       })
@@ -1362,6 +1588,16 @@ export default class Board extends View {
         .child(div().flex_1().min_w(0).truncate().font_family(MONO).text_size(11).text_color(C.dim).child(t.branch ?? ""))
         .child(this.stageButton(t)))
       .child(div().font_family(SANS).text_size(14).font_weight(600).text_color(C.text).child(t.name))
+      // its links, on a row of their own so the stage button above always fits: the Linear issue, and in Planning the
+      // plan its skill wrote, to read in the browser
+      .when(!!iss || (t.stage === "todo" && !!g?.plan), (el) => el.child(h_flex().w_full().flex_wrap().gap(6).items_center()
+        .when(!!iss, (el) => el.child(this.linkPill(`iss-${t.key}`, `↗ ${iss.id}`, REF_KINDS.linear[1],
+          (cx) => cx.spawn(async () => { await exec("open", [iss.url]); }))))
+        .when(t.stage === "todo" && !!g?.plan, (el) => el.child(this.linkPill(`plan-${t.key}`, "📄 Plan ready", C.land,
+          (cx) => cx.spawn(async () => {
+            try { await openPlan(g.plan, t.machine, `${iss?.id ?? t.name} plan`); }
+            catch (e) { notify({ title: "Couldn't open the plan", body: String(e.message ?? e), level: "error" }); }
+          }))))))
       // the agents, counted by status, then each one
       .child(h_flex().w_full().flex_wrap().gap(10).items_center()
         .when(!t.agents.length, (el) => el.child(mono(11, C.dim, "no agents")))
@@ -1378,6 +1614,27 @@ export default class Board extends View {
       .children(actions ? [actions] : []))
       .when(Boolean(near), (el) => el.child(div().absolute().left(0).right(0).h(3).bg(C.accent)
         .when(!near.after, (l) => l.top(0)).when(near.after, (l) => l.bottom(0))));
+  }
+
+  // a Linear card: its ID, title, team (or project) and priority, and ↗ Linear; dragged onto Planning or In progress
+  // (the only columns that light up for it) it opens its summary, and stays here until that starts it
+  linearCard(it) {
+    const i = it.issue, sel = it.key === this.sel;
+    const where = [i.project?.name ?? i.team?.name, i.priorityLabel && i.priorityLabel !== "No priority" ? i.priorityLabel : null]
+      .filter(Boolean).join(" · ");
+    return div().id(`card-${it.key}`).w_full().flex_none().flex().flex_row().rounded(6).overflow_hidden()
+      .bg(C.card).border(1).border_color(sel ? C.accent : C.line)
+      .cursor_pointer().hover((s) => s.bg(C.hover))
+      .on_mouse_down("left", () => { this.dragCard = it.key; this.dropCol = null; this.dropNear = null; })
+      .when(this.dragCard === it.key && Boolean(this.dropCol), (el) => el.opacity(0.45))
+      .on_click((_e, cx) => this.pick(cx, it.key))
+      .child(div().w(3).flex_none().bg(REF_KINDS.linear[1]))
+      .child(v_flex().flex_1().min_w(0).px(11).py(9).gap(5)
+        .child(h_flex().w_full().gap(6).items_center()
+          .child(div().flex_1().min_w(0).truncate().child(mono(11, REF_KINDS.linear[1], i.identifier)))
+          .child(this.btn(`lin-${it.key}`, "↗ Linear", "plain", (cx) => cx.spawn(async () => { await exec("open", [i.url]); }))))
+        .child(div().font_family(SANS).text_size(14).font_weight(600).text_color(C.text).child(i.title ?? ""))
+        .when(Boolean(where), (el) => el.child(div().truncate().child(mono(11, C.dim, where)))));
   }
 
   // Y: the selected worktree's question and the option its agent recommends (Yes, for a permission), if it has one
@@ -1406,6 +1663,7 @@ export default class Board extends View {
         h_flex().id(`ao-${t.key}-${o.n}`).w_full().min_h(24).px(6).py(4).gap(7).items_start().rounded(4)
           .border(1).border_color(rec(i) ? C.accentDim : C.line2).bg(C.card)
           .cursor_pointer().hover((s) => s.bg(C.hover).border_color(C.accent))
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation()) // not the card's drag (see btn)
           .on_click((_e, cx) => { cx.stop_propagation(); this.answerer.answer(q, o, cx); })
           .child(div().pt(1).flex_none().child(mono(10, C.muted, String(o.n))))
           .child(v_flex().flex_1().min_w(0).gap(1)
@@ -1430,21 +1688,21 @@ export default class Board extends View {
     // a stage picker or New agent over the board closed: the keys are the board's again (not in Focus, where they're
     // the answered terminal's)
     const rf = shared(REFOCUS) ?? 0;
-    if (rf !== this.refocusAt) { this.refocusAt = rf; if (!this.focus) this.grab(cx); }
+    if (rf !== this.refocusAt) { this.refocusAt = rf; this.cancelDrag(); if (!this.focus) this.grab(cx); }
     const every = this.cards;
     const cards = every.filter((t) => inScope(t.key));
     const away = every.filter((t) => !inScope(t.key)).reduce((n, t) => n + t.needs.length, 0);
     if (this.filter && !cards.some((t) => t.project === this.filter)) this.filter = null;
     if (this.peek && !shared(PEEK)) this.peek = false;
-    const cols = this.columns(false);
-    const by = (k) => cols[STAGES.findIndex(([c]) => c === k)];
+    const lc = this.linearCols(), cols = this.columns();
+    const by = (k) => cols[lc.findIndex(([c]) => c === k)];
     const week = this.week();
     const maxW = Math.max(1, ...week);
     const openPrs = new Set(cards.filter((t) => t.pr?.state === "OPEN").map((t) => t.pr.url)).size;
     const ags = cards.flatMap((t) => t.agents);
     const subs = cards.flatMap((t) => t.subs);
     // the oldest question
-    const asked = cols.flat().flatMap((t) => t.needs.map((x) => ({ t, x })));
+    const asked = cols.flat().flatMap((t) => (t.needs ?? []).map((x) => ({ t, x })));
     const next = asked.sort((p, q) => (p.x.tab?.changed_at ?? 0) - (q.x.tab?.changed_at ?? 0))[0];
     const projects = [...new Set(cards.map((t) => t.project))].sort();
     // the leftover worktrees of the repos shown
@@ -1509,37 +1767,38 @@ export default class Board extends View {
       return v_flex().id(`col-${k}`).min_h(0).gap(8).p(6).rounded(8).border(1)
         .flex_none().w(widths[i])
         .border_color(drop ? color : hot ? `${color}66` : "#00000000").bg(drop ? `${color}1a` : hot ? `${color}0d` : "#00000000")
-        // a card dragged over another column lands there on release
+        // a card dragged over another column lands there on release; a Linear card only on Planning or In progress, and
+        // nothing on the Linear column
         .on_mouse_move((_e, cx) => {
           if (!this.dragCard) return;
           const from = this.cards.find((x) => x.key === this.dragCard)?.stage;
-          const to = from && from !== k ? k : null;
+          const to = this.dragCard.startsWith("linear:") ? (canDrop(k) ? k : null) : k !== "linear" && from && from !== k ? k : null;
           if (to !== this.dropCol) { this.dropCol = to; cx.notify(); }
         })
         .on_mouse_up("left", (_e, cx) => this.dropCard(cx))
         .child(head)
-        .when(!folded, (el) => el.child(v_flex().id(`list-${k}`).w_full().flex_1().min_h(0).gap(8).overflow_y_scrollbar().track_scroll(this.scroll[i])
-          .children(list.map((t) => this.card(t)))));
+        .when(!folded, (el) => el.child(v_flex().id(`list-${k}`).w_full().flex_1().min_h(0).gap(8).overflow_y_scrollbar().track_scroll(this.scroll[k])
+          .children(list.map((t) => (k === "linear" ? this.linearCard(t) : this.card(t))))));
     };
 
     // the columns with cards share what the folded and empty ones leave, but never below COL_MIN: narrower than that
     // (an agent open beside the board) only the columns scroll sideways; the numbers and filters above keep the width
-    const fixed = 12 * (STAGES.length - 1) + STAGES.reduce((w, [k]) =>
+    const fixed = 12 * (lc.length - 1) + lc.reduce((w, [k]) =>
       w + (this.folded.has(k) ? FOLDED_W : by(k).length ? 0 : EMPTY_W), 0);
-    const open = STAGES.filter(([k]) => !this.folded.has(k) && by(k).length).length;
+    const open = lc.filter(([k]) => !this.folded.has(k) && by(k).length).length;
     const colW = Math.max(COL_MIN, Math.floor(((this.colsW ?? 0) - fixed) / Math.max(1, open)));
     // the columns scroll sideways by hand (a drag on the background, as Linear does, or the wheel): where each starts
     // a column whose card asks a question widens to fit its options (up to ASK_MAX_W; the columns then scroll sideways)
     const askW = (t) => {
-      const q = asksIn(t)[0];
+      const q = !t.issue && asksIn(t)[0];
       if (!q) return 0;
       const longest = Math.max(0, ...(pickable(q) ? q.options : []).map((o) => o.label.length), (q.question ?? "").length / 3);
       return Math.min(ASK_MAX_W, Math.round(longest * 6.6 + 100));
     };
-    const widths = STAGES.map(([k]) => (this.folded.has(k) ? FOLDED_W : by(k).length ? Math.max(colW, ...by(k).map(askW)) : EMPTY_W));
+    const widths = lc.map(([k]) => (this.folded.has(k) ? FOLDED_W : by(k).length ? Math.max(colW, ...by(k).map(askW)) : EMPTY_W));
     this.colWs = widths;
     this.colX = widths.map((_w, i) => widths.slice(0, i).reduce((a, b) => a + b, 0) + 12 * i);
-    const contentW = widths.reduce((a, b) => a + b, 0) + 12 * (STAGES.length - 1), view = this.colsW ?? 0;
+    const contentW = widths.reduce((a, b) => a + b, 0) + 12 * (lc.length - 1), view = this.colsW ?? 0;
     this.panMax = Math.max(0, contentW - view);
     this.panX = Math.min(this.panX, this.panMax);
     return v_flex().id("board").relative().size_full().bg(C.main).px(16).pt(14).pb(10).gap(12)
@@ -1575,7 +1834,7 @@ export default class Board extends View {
         })
         .when(Boolean(this.pan?.moved), (el) => el.cursor_grabbing())
         // a plain flex row: h_flex centres its children, which would shrink each column to its header
-        .child(div().absolute().top(0).bottom(8).left(-this.panX).flex().flex_row().gap(12).children(STAGES.map(column)))
+        .child(div().absolute().top(0).bottom(8).left(-this.panX).flex().flex_row().gap(12).children(lc.map(column)))
         // where the view is along the columns
         .when(this.panMax > 0 && contentW > 0, (el) => el.child(div().absolute().bottom(0).h(4).rounded(2).bg(C.line2)
           .left(Math.round((view * this.panX) / contentW)).w(Math.max(24, Math.round((view * view) / contentW))))))
@@ -1588,6 +1847,7 @@ export default class Board extends View {
     const j = shared(COL);
     if (!j?.at || j.at === this.colAt) return;
     this.colAt = j.at;
+    this.cancelDrag(); // the board shown again: no drag from before it was left carries on
     this.col = STAGES.some(([k]) => k === j.kind) ? j.kind : null;
     if (this.col) this.folded.delete(this.col);
     if (this.focus && this.col) {
@@ -1793,6 +2053,7 @@ export default class Board extends View {
     setShared(PENDING, null);
     setStage(s.id, p.stage);
     if (p.title) setShared(SPACE_TITLES, { ...(shared(SPACE_TITLES) ?? {}), [s.id]: p.title });
+    if (p.issue) setShared(SPACE_ISSUES, { ...(shared(SPACE_ISSUES) ?? {}), [s.id]: p.issue });
   }
 
   nav() {
@@ -1921,8 +2182,10 @@ export default class Board extends View {
         .child(div().px(8).pt(6).child(mono(10, C.dim, "drag to reorder · right-click for the stage"))));
   }
 
-  // the stage picker and New agent, closing (Esc, a pick, a click beside): the board takes the keyboard back
+  // the stage picker and New agent, closing (Esc, a pick, a click beside): the board takes the keyboard back, unless
+  // another dialog takes over from this one (a Linear card's stage, the summary's E, the dialog's Esc back)
   async close() {
+    if (this.handoff) return;
     if (this.part === "stage" || this.part === "new" || this.part === "cleanup" || this.part === "prs-settings") setShared(REFOCUS, Date.now());
   }
 
@@ -2016,14 +2279,28 @@ export default class Board extends View {
 
   initStage(cx) {
     const p = props() ?? {};
-    this.at = Math.max(0, STAGES.findIndex(([k]) => k === p.stage));
+    this.at = Math.max(0, this.stages().findIndex(([k]) => k === p.stage));
     this.h = cx.focus_handle();
     this.h.focus();
     cx.timer.after(300, () => this.h.focus());
   }
 
+  // the stages it offers: a Linear card's (only), else every one
+  stages() {
+    const only = (props() ?? {}).only;
+    return only ? STAGES.filter(([k]) => only.includes(k)) : STAGES;
+  }
+
+  // a Linear card's stage opens its summary there; a worktree's stage is set
   choose(stage) {
     const p = props() ?? {};
+    if (p.issue) {
+      if (!stage || stage === "delete") return;
+      this.handoff = true;
+      closeOverlay(p.overlay);
+      startIssue(p.issue, stage);
+      return;
+    }
     closeOverlay(p.overlay);
     if (stage === "delete") deleteWorktree(p.space);
     else if (stage !== p.stage) setStage(p.space, stage);
@@ -2032,22 +2309,24 @@ export default class Board extends View {
   stagePicker() {
     const p = props() ?? {};
     const title = String(p.title ?? "");
+    const list = this.stages();
     return v_flex().id("stage").size_full().p(5).bg("#18181b").track_focus(this.h)
       .on_key_down((e, cx) => {
         const k = e.key;
-        const last = STAGES.length - (p.deletable ? 0 : 1); // Delete worktree comes after the stages
-        if (/^[1-9]$/.test(k) && STAGES[Number(k) - 1]) this.choose(STAGES[Number(k) - 1][0]);
+        const last = list.length - (p.deletable ? 0 : 1); // Delete worktree comes after the stages
+        if (e.is_held && p.issue && (k === "enter" || /^[1-9]$/.test(k))) { cx.stop_propagation(); return; } // a held key would start it
+        if (/^[1-9]$/.test(k) && list[Number(k) - 1]) this.choose(list[Number(k) - 1][0]);
         else if (k === "down" || k === "j") this.at = Math.min(last, this.at + 1);
         else if (k === "up" || k === "k") this.at = Math.max(0, this.at - 1);
-        else if (k === "enter") this.choose(STAGES[this.at]?.[0] ?? "delete");
+        else if (k === "enter") this.choose(list[this.at]?.[0] ?? "delete");
         else if ((k === "backspace" || k === "delete") && p.deletable) this.choose("delete");
         else if (k === "escape") closeOverlay(p.overlay);
         else return;
         cx.stop_propagation();
         cx.notify();
       })
-      .child(div().px(9).pt(6).pb(6).truncate().child(mono(10, C.dim, `MOVE ${trunc(title, 24)} TO`)))
-      .children(STAGES.map(([k, label, color], i) => h_flex().id(`st-${k}`).h(30).flex_none().px(9).gap(10).items_center().rounded(6)
+      .child(div().px(9).pt(6).pb(6).truncate().child(mono(10, C.dim, p.issue ? `START ${trunc(title, 24)} IN` : `MOVE ${trunc(title, 24)} TO`)))
+      .children(list.map(([k, label, color], i) => h_flex().id(`st-${k}`).h(30).flex_none().px(9).gap(10).items_center().rounded(6)
         .bg(i === this.at ? C.raised : "#00000000").cursor_pointer().hover((st) => st.bg(C.raised))
         .on_click(() => this.choose(k))
         .child(div().w(8).h(8).flex_none().rounded(4).bg(color))
@@ -2057,7 +2336,7 @@ export default class Board extends View {
       .when(!!p.deletable, (el) => el
         .child(div().h(1).mx(6).my(4).bg(C.line2))
         .child(h_flex().id("st-delete").h(30).flex_none().px(9).gap(10).items_center().rounded(6)
-          .bg(this.at === STAGES.length ? "#3b1d24" : "#00000000").cursor_pointer().hover((st) => st.bg("#3b1d24"))
+          .bg(this.at === list.length ? "#3b1d24" : "#00000000").cursor_pointer().hover((st) => st.bg("#3b1d24"))
           .on_click(() => this.choose("delete"))
           .child(div().w(8).flex_none().text_size(11).text_color(C.red).child("×"))
           .child(div().flex_1().font_family(SANS).text_size(13).text_color(C.red).child("Delete worktree…"))
@@ -2069,13 +2348,27 @@ export default class Board extends View {
   initNew(cx) {
     const p = props() ?? {};
     this.choices = NEW_AGENTS;
-    this.pickKey = shared(PICK) ?? "claude";
-    this.stage = shared(NEW_STAGE) ?? DEFAULT_STAGE;
+    this.summary = p.summary === true; // a Linear card's short summary, before the full dialog (E)
+    this.pickKey = p.agent ?? shared(PICK) ?? "claude";
+    this.stage = p.stage ?? shared(NEW_STAGE) ?? DEFAULT_STAGE;
     // the worktree it's for: the one given (+ Agent), else the shown space, whose repo a new worktree comes from
     this.src = spaces().find((s) => s.id === (p.space ?? activeSpace()?.id)) ?? null;
     this.mode = p.space ? "here" : "worktree"; // "worktree": a new one; "here": one more agent in this.src
     this.fixed = Boolean(p.space); // + Agent on a worktree: its machine and space, no picking
     this.machine = this.src?.machine ?? null; // where the agent runs: null this computer, else a machine's name
+    // from a Linear card: the machine and repo folder it starts from (the shown space only counts on that machine)
+    if (p.machine !== undefined) {
+      this.machine = p.machine;
+      if ((this.src?.machine ?? null) !== p.machine) this.src = null;
+    }
+    this.dir = p.dir ?? null; // the repo folder probed, in place of the space's
+    this.fromLinear = p.fromLinear === true;
+    this.linearCard = p.issue ?? null; // the Linear card it came from, whole ({id, url, title, branchName, uuid, teamId})
+    // the skills: board.json's, those installed for this machine and repo, and yours (undefined: automatic, see skillOn)
+    this.cfg = readBoardConfig(null);
+    this.installed = undefined; // undefined: still asking the machine (a Linear card's start waits for it)
+    this.skillPick = p.skill;
+    this.followStage = Boolean(p.stage); // opened on a stage (a Linear drag): the skill follows the stage you give
     this.repo = undefined; // undefined: looking, null: not in git, else {top, main, name, base, home}
     this.busy = false;
     this.error = "";
@@ -2088,46 +2381,49 @@ export default class Board extends View {
     this.branch.on("change", (_e, cx) => { this.branchText = this.branch.value(); this.error = ""; cx.notify(); });
     this.branch.on("submit", (_e, cx) => this.start(cx));
     // the references: what you paste or pick, kept as {kind, id, url, title?, branchName?}
-    this.refs = [];
+    const issue = this.linearCard;
+    this.refs = issue ? [{ kind: "linear", id: issue.id, url: issue.url, title: issue.title, branchName: issue.branchName }] : [];
     this.refText = "";
     this.refFocused = false;
     this.issues = null; // your open Linear issues, when LINEAR_API_KEY is set; null: none (no key, or not read)
+    this.projects = []; // the workspace's open Linear projects, the most recently updated first
     this.found = null; // Linear's search for what you typed, when your own issues don't have it
+    this.foundProjects = null; // and the projects it finds
     this.linearKey = null;
-    this.orchestrate = true; // opt-out: with a Linear issue, the agent starts on the orchestrator skill
-    this.canOrchestrate = false; // the skill is installed where the agent runs
-    this.ref = InputState.new({ placeholder: "Paste a Linear issue, PR or Slack link, or search your issues" });
-    this.ref.on("change", (_e, cx) => { this.refText = this.ref.value(); this.found = null; this.searchLinear(cx); cx.notify(); });
+    this.ref = InputState.new({ placeholder: "Paste a Linear issue or project, a PR or Slack link, or search Linear" });
+    this.ref.on("change", (_e, cx) => { this.refText = this.ref.value(); this.found = null; this.foundProjects = null; this.searchLinear(cx); cx.notify(); });
     this.ref.on("submit", (_e, cx) => this.addRef(cx));
     this.ref.on("focus", (_e, cx) => { this.refFocused = true; cx.notify(); });
     this.ref.on("blur", (_e, cx) => { this.refFocused = false; cx.notify(); });
-    this.ref.focus();
-    cx.timer.after(600, () => this.ref.focus());
-    cx.spawn(async (cx) => {
+    if (this.summary) {
+      // the summary only has keys: ⏎, E, Esc
+      this.h = cx.focus_handle();
+      this.h.focus();
+      cx.timer.after(300, () => this.h.focus());
+    } else {
+      this.ref.focus();
+      cx.timer.after(600, () => this.ref.focus());
+    }
+    if (!this.summary) cx.spawn(async (cx) => {
       try {
-        // the key from Herdr's environment, else from your login shell (only the key is kept from what it prints)
-        let r = await exec("sh", ["-c", 'printf %s "$LINEAR_API_KEY"']);
-        let key = /lin_api_[A-Za-z0-9]+/.exec(r.stdout ?? "")?.[0];
-        if (!key) {
-          r = await exec("sh", ["-c", 'exec "${SHELL:-/bin/zsh}" -lic "$1"', "sh", 'printf "\n%s\n" "$LINEAR_API_KEY"'], { timeout: 8000 });
-          key = /lin_api_[A-Za-z0-9]+/.exec(r.stdout ?? "")?.[0];
-        }
+        const key = await linearKey();
         if (!key) return;
         this.linearKey = key;
-        const d = await linear(key, `{ viewer { assignedIssues(first: 50, orderBy: updatedAt, filter: { state: { type: { nin: ["completed", "canceled"] } } }) { nodes { ${LINEAR_ISSUE} } } } }`);
+        const d = await linear(cx, key, `{ viewer { assignedIssues(first: 50, orderBy: updatedAt, filter: { state: { type: { nin: ["completed", "canceled"] } } }) { nodes { ${LINEAR_ISSUE} } } } ${OPEN_PROJECTS} }`);
         this.issues = d.viewer.assignedIssues.nodes;
+        this.projects = d.projects?.nodes ?? [];
       } catch (e) { this.linearError = String(e.message ?? e); }
       cx.notify();
     });
     this.probe(cx);
   }
 
-  // what the machine the agent runs on has: its agents, the orchestrator skill, and the repo of the space it starts
-  // from; asked again when you pick another machine (an answer for the one before is dropped)
+  // what the machine the agent runs on has: its agents, the repo of the space it starts from, and the skills installed
+  // for both; asked again when you pick another machine (an answer for the one before is dropped)
   probe(cx) {
     const gen = (this.gen = (this.gen ?? 0) + 1), stale = () => gen !== this.gen;
     this.choices = NEW_AGENTS;
-    this.canOrchestrate = false;
+    this.installed = undefined;
     this.repo = undefined;
     const on = this.machine ?? undefined;
     cx.spawn(async (cx) => {
@@ -2143,15 +2439,7 @@ export default class Board extends View {
     });
     cx.spawn(async (cx) => {
       try {
-        const skill = await orchestrateSkill();
-        const r = skill && await exec("sh", ["-c", 'test -f "$HOME/.claude/skills/$1/SKILL.md"', "sh", skill], { on });
-        if (!stale()) { this.skill = skill; this.canOrchestrate = r?.code === 0; }
-      } catch { /* not there */ }
-      if (!stale()) cx.notify();
-    });
-    cx.spawn(async (cx) => {
-      try {
-        const dir = this.src ? place(this.src) : null;
+        const dir = this.dir ?? (this.src ? place(this.src) : null);
         const r = dir ? await exec("sh", ["-c", REPO, "sh", dir], { on }) : null;
         const v = r?.code === 0 ? kv(r.stdout) : {};
         const main = v.common ? (v.common.endsWith("/.git") ? v.common.slice(0, -5) : v.common) : null;
@@ -2159,6 +2447,16 @@ export default class Board extends View {
         this.repo = v.top && main && v.home ? { top: v.top, main, name: base(main), base: v.base || null, home: v.home } : null;
       } catch { if (stale()) return; this.repo = null; }
       if (!this.repo && this.mode === "worktree") this.mode = "here";
+      cx.notify();
+      // then the skills, once the repo is known: a repo's own skills only count in that repo
+      try {
+        const cfg = await boardConfig();
+        if (stale()) return;
+        this.cfg = cfg;
+        const r = cfg.skills.length ? await exec("sh", ["-c", SKILLS, "sh", this.repo?.top ?? "", ...cfg.skills], { on }) : null;
+        if (stale()) return;
+        this.installed = new Set((r?.stdout ?? "").split("\n").filter((s) => cfg.skills.includes(s)));
+      } catch { if (!stale()) this.installed = new Set(); } // none installed
       if (!stale()) cx.notify();
     });
   }
@@ -2173,21 +2471,30 @@ export default class Board extends View {
     const best = (list) => list.find((s) => s.active) ?? [...list].sort((x, y) => used(y) - used(x))[0];
     const same = there.filter((s) => name && repos[s.id]?.name === name);
     this.machine = m;
+    this.dir = null; // a folder given for the machine before
     this.src = best(same.filter((s) => !isWorktree(s) && !s.folder?.includes("/.herdr/worktrees/"))) ?? best(same) ?? best(there) ?? null;
     this.mode = "worktree";
     this.probe(cx);
     cx.notify();
   }
 
-  // your issues that match what you typed (by id or title), then Linear's search for it
+  // what the list under the field offers for what you typed: your issues (by id or title) and the open projects (by
+  // name), then Linear's search for both; projects carry `project: true`. Empty, your latest issues and a couple of
+  // the latest projects
   matches() {
     if (!this.issues) return [];
     const q = this.refText.trim().toLowerCase();
     if (/^https?:\/\//.test(q)) return [];
     const taken = new Set(this.refs.map((r) => r.id));
-    const mine = this.issues.filter((i) => !taken.has(i.identifier) && (!q || `${i.identifier} ${i.title}`.toLowerCase().includes(q)));
-    const more = (this.found ?? []).filter((i) => !taken.has(i.identifier) && !mine.some((x) => x.identifier === i.identifier));
-    return [...mine, ...more].slice(0, 6);
+    const issue = (i) => !taken.has(i.identifier) && (!q || `${i.identifier} ${i.title}`.toLowerCase().includes(q));
+    const project = (p) => !taken.has(p.slugId) && (!q || p.name.toLowerCase().includes(q));
+    const mine = this.issues.filter(issue);
+    const projects = this.projects.filter(project).map((p) => ({ ...p, project: true }));
+    const more = (this.found ?? []).filter((i) => issue(i) && !mine.some((x) => x.identifier === i.identifier));
+    const moreProjects = (this.foundProjects ?? []).filter((p) => !taken.has(p.slugId) && !projects.some((x) => x.slugId === p.slugId))
+      .map((p) => ({ ...p, project: true }));
+    if (!q) return [...mine.slice(0, 4), ...projects.slice(0, 2)];
+    return [...mine, ...projects, ...more, ...moreProjects].slice(0, 6);
   }
 
   // typing a few letters none of your issues has: Linear's search, a moment after you stop
@@ -2199,60 +2506,118 @@ export default class Board extends View {
       if (seq !== this.searchSeq) return;
       cx.spawn(async (cx) => {
         try {
-          const d = await linear(this.linearKey, `query($t: String!) { searchIssues(term: $t, first: 8) { nodes { ${LINEAR_ISSUE} } } }`, { t: q });
-          if (seq === this.searchSeq) { this.found = d.searchIssues.nodes; cx.notify(); }
+          const d = await linear(cx, this.linearKey, `query($t: String!) { searchIssues(term: $t, first: 8) { nodes { ${LINEAR_ISSUE} } } searchProjects(term: $t, first: 4) { nodes { ${LINEAR_PROJECT} } } }`, { t: q });
+          if (seq === this.searchSeq) { this.found = d.searchIssues.nodes; this.foundProjects = d.searchProjects?.nodes ?? []; cx.notify(); }
         } catch { /* your own issues still show */ }
       });
     });
   }
 
-  // ⏎ in the reference field: a link or id as it is (a Linear one with its title when it's among yours), else the
-  // first issue that matches, else a note; empty, on to the message
-  addRef(cx, issue) {
-    if (!issue && !this.refText.trim()) { this.task.focus(); return; }
+  // ⏎ in the reference field: a link or id as it is (a Linear one with its title when it's among yours, a project's
+  // with its name when it's open), else the first issue or project that matches, else a note; empty, on to the message
+  addRef(cx, item) {
+    if (!item && !this.refText.trim()) { this.task.focus(); return; }
+    const asRef = (i) => (i.project ? projectRef(i) : { kind: "linear", id: i.identifier, url: i.url, title: i.title, branchName: i.branchName });
     let r;
-    if (issue) r = { kind: "linear", id: issue.identifier, url: issue.url, title: issue.title, branchName: issue.branchName };
+    if (item) r = asRef(item);
     else {
       r = classify(this.refText);
       const pick = r.kind === "note" ? this.matches()[0] : null;
-      if (pick) r = { kind: "linear", id: pick.identifier, url: pick.url, title: pick.title, branchName: pick.branchName };
+      if (pick) r = asRef(pick);
       const known = r.kind === "linear" && [...(this.issues ?? []), ...(this.found ?? [])].find((i) => i.identifier === r.id);
       if (known) r = { ...r, url: known.url, title: known.title, branchName: known.branchName };
+      const project = r.kind === "project" && !r.title && [...this.projects, ...(this.foundProjects ?? [])].find((p) => p.slugId === r.id);
+      if (project) r = { ...r, title: project.name };
     }
     if (!this.refs.some((x) => x.kind === r.kind && x.id === r.id && x.url === r.url)) this.refs.push(r);
     this.ref.set_value("");
     this.refText = "";
     this.found = null;
+    this.foundProjects = null;
     this.ref.focus();
     cx.notify();
   }
 
-  // the worktree's title on the board: the Linear issue's title, else the first sentence of your message, shortened
+  // the Linear issue and project among the references, if any
+  linearIssue() { return this.refs.find((r) => r.kind === "linear"); }
+
+  // from a Linear card the dialog starts in the last start's repo (dir); when the shown space is another repo, a new
+  // worktree of that one is a click away, and the remembered repo a click back: {name, go} or null
+  otherRepo() {
+    if (!this.fromLinear || this.summary || this.fixed) return null;
+    if (!this.dir) {
+      const b = this.backTo;
+      return b ? { name: b.name, go: (cx) => { Object.assign(this, { machine: b.machine, src: b.src, dir: b.dir, backTo: null }); this.reprobe(cx); } } : null;
+    }
+    const s = activeSpace(), r = s ? (shared(REPOS) ?? {})[s.id] : null;
+    if (!r || !this.repo || ((s.machine ?? null) === this.machine && r.common.replace(/\/\.git$/, "") === this.repo.main)) return null;
+    return { name: r.name, go: (cx) => {
+      this.backTo = { machine: this.machine, src: this.src, dir: this.dir, name: this.repo.name };
+      Object.assign(this, { machine: s.machine ?? null, src: s, dir: null });
+      this.reprobe(cx);
+    } };
+  }
+  reprobe(cx) { this.mode = "worktree"; this.error = ""; this.probe(cx); this.branch.focus(); cx.notify(); }
+  linearProject() { return this.refs.find((r) => r.kind === "project"); }
+
+  // the worktree's title on the board: the Linear issue's title, else the project's name, else the first sentence of
+  // your message, shortened
   title() {
-    const issue = this.refs.find((r) => r.kind === "linear");
-    return shortTitle(issue?.title || this.text) || (issue ? issue.id : "");
+    const issue = this.linearIssue(), project = this.linearProject();
+    return shortTitle(issue?.title || project?.title || this.text) || (issue ? issue.id : "");
   }
 
-  // whether the agent starts on the orchestrator skill: offered (a Linear issue, the skill installed) and not turned off
-  orchestrating() {
-    return this.orchestrate && this.canOrchestrate && this.refs.some((r) => r.kind === "linear");
+  // the skill it starts on: the one you picked, else the stage's when opened on a stage (a Linear drag), else the
+  // in-progress one with a Linear issue or project; only when installed for this machine and repo
+  skillOn() {
+    const s = this.skillPick !== undefined ? this.skillPick
+      : this.followStage ? this.cfg.stageSkills[this.stage]
+      : this.linearIssue() || this.linearProject() ? this.cfg.stageSkills.in_progress : null;
+    return s && this.installed?.has(s) ? s : null;
   }
 
-  // the agent it starts: the one picked, but always Claude Code to orchestrate (the skill orchestrates only there)
+  // with a skill on and nothing to start from, your message is required
+  needsText() {
+    return Boolean(this.skillOn()) && !this.refs.length && !this.text.trim();
+  }
+
+  // why ⏎ can't start, else null: the machine is offline; or (a Linear card, a stage or skill given) the repo and skills
+  // aren't known yet; or the summary has no git repo for a worktree; or the stage's skill isn't installed there, since a
+  // Linear card never starts without it (a skill you pick in the dialog is your call)
+  blocker() {
+    if (machines().find((m) => (m.name ?? null) === this.machine)?.layout === "unavailable") return `${machineLabel(this.machine)} is offline`;
+    const waits = this.fromLinear || this.followStage || this.skillPick !== undefined;
+    if (waits && (this.repo === undefined || this.installed === undefined)) return "still checking…";
+    if (this.summary && !this.repo) return "no git repo here to make a worktree in";
+    const want = this.cfg.stageSkills[this.stage];
+    if (this.fromLinear && this.skillPick === undefined && want && !this.installed.has(want)) {
+      return `${want} isn't installed for ${this.repo?.name ?? "this folder"}`;
+    }
+    return null;
+  }
+
+  // a Linear card's worktree shows where the card was: the board drops a repo or machine filter it would fall outside of
+  showOnBoard() {
+    if (shared(SCOPE) !== "all" && this.repo?.name !== (shared(REPOS) ?? {})[activeSpace()?.id]?.name) setShared(SCOPE, "all");
+    const m = shared(MACHINE);
+    if (m != null && m !== (this.machine ?? "")) setShared(MACHINE, null);
+  }
+
+  // the agent it starts: the one picked, but always Claude Code for a skill (skills run only there)
   agent() {
-    const key = this.orchestrating() ? "claude" : this.pickKey;
+    const key = this.skillOn() ? "claude" : this.pickKey;
     return this.choices.find((x) => x.key === key) ?? this.choices[0];
   }
 
-  // the first message: what you wrote (or, with a Linear issue and nothing written, to start on it), then the
-  // references as a Context block; to orchestrate, the skill first and your message required (the skill reads the
-  // issue's sub-issues itself)
+  // the first message (linear-rules' firstMessage): the skill's command, or what you wrote (with a Linear issue or
+  // project and nothing written, to start on it), then the references as a Context block. The stage only counts for a
+  // new worktree: one more agent in a worktree keeps today's sentence
   prompt() {
-    const issue = this.refs.find((r) => r.kind === "linear");
-    if (this.orchestrating() && !this.text.trim()) return "";
-    const ask = this.orchestrating() ? `/${this.skill} ${this.text.trim()}`
-      : this.text.trim() || (issue ? `Start working on the Linear issue ${issue.id}.` : "");
-    return this.refs.length ? [ask, "", "Context:", ...this.refs.map(refLine)].join("\n").trim() : ask;
+    const skill = this.skillOn(), issue = this.linearIssue(), project = this.linearProject();
+    const text = this.text.trim()
+      || (!skill && !issue && project ? `Start working on the Linear project ${project.title ?? project.url}.` : "");
+    return firstMessage({ skill, cfg: this.cfg, issueId: issue?.id ?? null, stage: this.mode === "worktree" ? this.stage : null,
+      text, context: this.refs.map(refLine) });
   }
 
   // the new worktree's branch: what you typed, else the Linear issue's (Linear's own name for it), else made from the
@@ -2260,9 +2625,11 @@ export default class Board extends View {
   branchName() {
     const typed = this.branchText.trim();
     if (typed) return typed;
-    const issue = this.refs.find((r) => r.kind === "linear");
+    const issue = this.linearIssue(), project = this.linearProject();
     if (issue?.branchName) return issue.branchName;
     if (issue) return [issue.id.toLowerCase(), branchFrom(issue.title || this.text)].filter(Boolean).join("-");
+    const fromProject = project?.title ? branchFrom(project.title) : "";
+    if (fromProject) return fromProject;
     const fromTask = branchFrom(this.text);
     if (fromTask) return fromTask;
     const d = new Date(), p2 = (n) => String(n).padStart(2, "0");
@@ -2273,16 +2640,40 @@ export default class Board extends View {
   // worktree; with a first message the agent starts on it and the board stays, without one its terminal shows
   start(cx) {
     if (this.busy) return;
-    const a = this.agent(), orchestrating = this.orchestrating();
+    const a = this.agent(), skill = this.skillOn();
     if (!a || a.installed === false) return;
     if (this.mode === "worktree" ? !this.repo : !this.src) return;
-    if (orchestrating && !this.text.trim()) { this.task.focus(); return; }
+    if (this.needsText()) { this.task.focus(); return; }
+    if (this.blocker()) return; // the summary and the footer say why
+    const issue = this.linearIssue(), project = this.linearProject();
+    // a Linear issue starts once: another summary or dialog for it, or a repeated key, is refused while it's starting
+    // (its start, below, writes STARTING; a failed one takes it back)
+    if (this.fromLinear && issue && Date.now() - ((shared(STARTING) ?? {})[issue.id] ?? 0) < 120000) {
+      this.error = `${issue.id} is already starting`;
+      cx.notify();
+      return;
+    }
+    if (this.fromLinear) this.showOnBoard();
     const task = this.prompt();
-    const issue = this.refs.find((r) => r.kind === "linear");
-    const name = issue ? trunc(`${issue.id}${issue.title ? ` ${issue.title}` : ""}`, 40) : this.text.trim() ? trunc(this.text.trim(), 40) : a.name;
+    const name = issue ? trunc(`${issue.id}${issue.title ? ` ${issue.title}` : ""}`, 40) : project?.title ? trunc(project.title, 40)
+      : this.text.trim() ? trunc(this.text.trim(), 40) : a.name;
     const args = launch(a, task);
     const done = () => {
-      if (!orchestrating) setShared(PICK, a.key); // the agent you pick next time stays yours
+      if (!skill) setShared(PICK, a.key); // the agent you pick next time stays yours
+      setShared(LAST, { machine: this.machine, agent: a.key, repo: this.repo }); // where the Linear summary starts next
+      // a Linear card's start: its column hides it until Linear says it started (or its worktree shows), 2 minutes at most
+      if (this.fromLinear && issue) {
+        const now = Date.now();
+        const kept = Object.entries(shared(STARTING) ?? {}).filter(([, at]) => now - at < 120000);
+        setShared(STARTING, { ...Object.fromEntries(kept), [issue.id]: now });
+        // started in progress: the board moves it in Linear (never this dialog); only for the card's own issue, still
+        // referenced (a removed chip means no write), and known by Linear's ids
+        const card = this.linearCard;
+        if (moveInLinear(this.fromLinear, this.stage) && card?.uuid && card.teamId && issue.id === card.id) {
+          const queue = (shared(LINEAR_MOVES) ?? []).filter((m) => now - m.at < MOVE_MS && m.uuid !== card.uuid);
+          setShared(LINEAR_MOVES, [...queue, { uuid: card.uuid, teamId: card.teamId, id: card.id, at: now }]);
+        }
+      }
       if (!task) {
         showWork();
       }
@@ -2294,8 +2685,15 @@ export default class Board extends View {
       return;
     }
     const branch = this.branchName();
-    const repo = this.repo, on = this.src?.machine ?? undefined;
+    const repo = this.repo, on = this.machine ?? undefined;
     const path = `${repo.home}/.herdr/worktrees/${repo.name}/${slugPath(branch)}`;
+    // a Linear card's start begins: its column hides it from now (a failed start takes this back)
+    const link = issue?.url ? { id: issue.id, url: issue.url } : null;
+    if (this.fromLinear && issue) {
+      const now = Date.now();
+      const kept = Object.entries(shared(STARTING) ?? {}).filter(([, at]) => now - at < 120000);
+      setShared(STARTING, { ...Object.fromEntries(kept), [issue.id]: now });
+    }
     this.busy = true;
     this.error = "";
     cx.notify();
@@ -2320,21 +2718,26 @@ export default class Board extends View {
           if (r.code !== 0) throw new Error(lastLine(r.stderr) || lastLine(r.stdout) || "git worktree add failed");
           folder = path;
         }
-        setShared(NEW_STAGE, this.stage);
+        if (!this.followStage) setShared(NEW_STAGE, this.stage); // a Linear card's stage isn't the next New agent's
         if (task) setShared(STAY, Date.now());
         // a space already showing that worktree gets the agent as one more tab; else a space opens in it, unnamed, so
         // it follows the checkout and nests under its repo in Spaces, as Herdr's own worktrees do
         const open = known && showing(folder, on);
         if (open) {
           run("tab.new", { ...args, name, space: open.id });
+          if (link) setShared(SPACE_ISSUES, { ...(shared(SPACE_ISSUES) ?? {}), [open.id]: link });
           if (!(shared(SPACE_TITLES) ?? {})[open.id] && this.title()) setShared(SPACE_TITLES, { ...(shared(SPACE_TITLES) ?? {}), [open.id]: this.title() });
         } else {
-          setShared(PENDING, { stage: this.stage, folder, at: Date.now(), title: this.title() });
+          setShared(PENDING, { stage: this.stage, folder, at: Date.now(), title: this.title(), issue: link });
           run("space.new", { ...args, folder, tab: name, machine: on ?? "" });
         }
         this.busy = false;
         done();
       } catch (e) {
+        if (this.fromLinear && issue) {
+          const { [issue.id]: _gone, ...rest } = shared(STARTING) ?? {};
+          setShared(STARTING, rest);
+        }
         this.busy = false;
         this.error = String(e.message ?? e);
         cx.notify();
@@ -2342,17 +2745,83 @@ export default class Board extends View {
     });
   }
 
+  // the summary's keys: ⏎ starts (when nothing blocks it; a held ⏎ that opened the summary doesn't), E the full
+  // dialog (always), Esc closes and nothing changes
+  summaryKey(cx, k, held) {
+    const p = props() ?? {};
+    if (k === "enter") { if (!held) this.start(cx); }
+    else if (k === "e" || k === "E") this.edit();
+    else if (k === "escape") { if (!this.busy) closeOverlay(p.overlay); } // a start under way finishes first
+    else return false;
+    return true;
+  }
+
+  // E: the full dialog takes over from the summary (not while a start is under way)
+  edit() {
+    if (this.busy) return;
+    this.handoff = true;
+    editIssue(props() ?? {});
+  }
+
+  // Esc in the full dialog opened from the summary goes back to the summary
+  newKey(cx, k) {
+    const p = props() ?? {};
+    if (k !== "escape" || !p.fromLinear || !p.wasSummary || this.busy) return false;
+    this.handoff = true;
+    closeOverlay(p.overlay);
+    startIssue(p.issue, p.stage);
+    return true;
+  }
+
+  // a Linear card dropped on a stage: what ⏎ starts (where, with what, which skill, what happens in Linear), or why not
+  summaryDialog() {
+    const issue = this.linearCard ?? {}, a = this.agent(), skill = this.skillOn(), want = this.cfg.stageSkills[this.stage] ?? null;
+    const why = this.blocker(), ready = Boolean(a) && a.installed !== false && !this.busy && !why;
+    const row = (k, v, color) => h_flex().h(24).flex_none().gap(12).items_center()
+      .child(div().w(64).flex_none().child(mono(10, C.dim, k.toUpperCase())))
+      .child(div().flex_1().min_w(0).truncate().child(mono(12, color ?? C.text, v)));
+    const button = (id, key, text, primary, enabled, onClick) => h_flex().id(id).h(32).px(12).gap(7).items_center().rounded(8).border(1)
+      .border_color(primary ? C.accent : C.line2).bg(primary ? C.accent : C.raised).text_color(primary ? "#0f0f11" : C.text)
+      .cursor_pointer().hover((st) => st.opacity(0.85)).when(!enabled, (el) => el.opacity(0.4))
+      .on_click((_e, cx) => { if (enabled) onClick(cx); })
+      .child(div().font_family(MONO).text_size(11).opacity(0.7).child(key))
+      .child(div().font_family(SANS).text_size(13).font_weight(primary ? 600 : 400).child(text));
+    const p = props() ?? {};
+    return v_flex().id("summary").size_full().p(18).bg("#18181b").text_color(C.text).track_focus(this.h)
+      .on_key_down((e, cx) => {
+        const m = e.modifiers;
+        if (m.platform || m.control || m.alt) return;
+        if (this.summaryKey(cx, e.key, e.is_held)) { cx.stop_propagation(); cx.notify(); }
+      })
+      .child(div().truncate().font_family(SANS).text_size(16).font_weight(600).child(`Start ${issue.id ?? "the issue"}?`))
+      .child(div().pt(2).pb(10).truncate().font_family(SANS).text_size(12).text_color(C.muted).child(issue.title ?? ""))
+      .child(row("Machine", machineLabel(this.machine)))
+      .child(row("Agent", a?.name ?? "…", a?.installed === false ? C.red : C.text))
+      .child(row("Repo", this.repo === undefined ? "looking…" : this.repo ? this.repo.name : "not in a git repo", this.repo ? C.text : C.dim))
+      .child(row("Branch", this.branchName()))
+      .child(row("Skill", skill ?? want ?? "none", skill || !want ? C.text : C.dim))
+      .child(row("Linear", moveInLinear(true, this.stage) ? "Todo → In Progress" : "stays in Todo"))
+      .child(div().pt(8).truncate().child(this.error ? mono(11, C.red, this.error)
+        : mono(11, C.dim, this.busy ? "creating the worktree…" : why ?? (skill ? `it starts on /${skill}; the board stays` : "it starts on the issue; the board stays"))))
+      .child(div().flex_1())
+      .child(h_flex().gap(8).items_center()
+        .child(div().flex_1())
+        .child(button("sum-start", "⏎", this.busy ? "Creating…" : "Start", true, ready, (cx) => this.start(cx)))
+        .child(button("sum-edit", "E", "Edit", false, !this.busy, () => this.edit()))
+        .child(button("sum-cancel", "Esc", "Cancel", false, !this.busy, () => closeOverlay(p.overlay))));
+  }
+
   newDialog() {
     const h = home();
     const tilde = (p) => (p && h && p.startsWith(h) ? "~" + p.slice(h.length) : p ?? "");
-    const a = this.agent(), orchestrating = this.orchestrating();
+    const a = this.agent(), skill = this.skillOn(), needsText = this.needsText();
     const fresh = this.mode === "worktree";
     const label = (text) => div().pt(14).pb(7).child(mono(10, C.dim, text));
     const radio = (on) => div().w(14).h(14).flex_none().rounded(7).border(1).border_color(on ? C.accent : C.line2)
       .flex().items_center().justify_center().children(on ? [div().w(6).h(6).rounded(3).bg(C.accent)] : []);
     const agentCard = (x) => {
-      // to orchestrate, only Claude Code: the others dim, as an agent that isn't installed
-      const on = x.key === a.key, off = x.installed === false || (orchestrating && x.key !== a.key);
+      // with a skill, only Claude Code: the others dim, as an agent that isn't installed
+      const on = x.key === a.key, off = x.installed === false || (Boolean(skill) && x.key !== a.key);
       return h_flex().id(`new-${x.key}`).flex_1().min_w(0).h(52).px(12).gap(10).items_center().rounded(8).border(1)
         .border_color(on ? C.accent : C.line2).bg(on ? "#1c1926" : C.card).cursor_pointer().hover((st) => st.bg(on ? "#1c1926" : C.hover))
         .when(off, (el) => el.opacity(0.45))
@@ -2361,7 +2830,7 @@ export default class Board extends View {
         .child(v_flex().flex_1().min_w(0)
           .child(div().font_family(SANS).text_size(14).text_color(C.text).child(x.name))
           .child(div().truncate().child(mono(10, x.installed === false ? C.red : C.dim,
-            x.installed === false ? "not installed" : off ? "orchestrating runs Claude Code" : x.run.join(" ")))))
+            x.installed === false ? "not installed" : off ? "a skill runs in Claude Code" : x.run.join(" ")))))
         .child(radio(on));
     };
     const where = (id, on, enabled, title, sub, onClick) => h_flex().id(id).w_full().h(42).px(12).gap(10).items_center().rounded(7).border(1)
@@ -2375,13 +2844,16 @@ export default class Board extends View {
       .border_color(primary ? C.accent : C.line2).bg(primary ? C.accent : C.raised).text_color(primary ? "#0f0f11" : C.text)
       .font_family(SANS).text_size(13).font_weight(primary ? 600 : 400).cursor_pointer().hover((st) => st.opacity(0.85))
       .when(!enabled, (el) => el.opacity(0.4)).on_click(onClick).child(text);
-    const repoSub = !this.src ? `no space on ${machineLabel(this.machine)} to start from`
+    const repoSub = !this.src && !this.dir ? `no space on ${machineLabel(this.machine)} to start from`
       : this.repo === undefined ? "looking for the repo…" : this.repo
       ? `${this.repo.name} · from ${this.repo.base ?? "HEAD"} · ~/.herdr/worktrees/${this.repo.name}/${slugPath(this.branchName())}`
       : "not in a git repo";
     const srcName = this.src ? (this.src.named ? this.src.name : this.src.branch || this.src.name) : "no space";
-    const ready = a && a.installed !== false && !this.busy && (fresh ? this.repo : this.src) && (!orchestrating || this.text.trim());
+    const why = this.blocker();
+    const ready = a && a.installed !== false && !this.busy && (fresh ? this.repo : this.src) && !needsText && !why;
+    const issue = this.linearIssue(), project = this.linearProject(), other = this.otherRepo();
     return v_flex().id("new").size_full().p(18).bg("#18181b").text_color(C.text)
+      .on_key_down((e, cx) => { if (this.newKey(cx, e.key)) cx.stop_propagation(); })
       .child(h_flex().items_center()
         .child(div().flex_1().font_family(SANS).text_size(16).font_weight(600).child("New agent"))
         .child(mono(11, C.dim, "Esc")))
@@ -2403,7 +2875,13 @@ export default class Board extends View {
         .child(where("new-worktree", fresh, Boolean(this.repo), "New worktree", repoSub,
           (cx) => { this.mode = "worktree"; this.branch.focus(); cx.notify(); }))
         .child(where("new-here", !fresh, Boolean(this.src), "In this worktree", `${srcName} · ${tilde(this.src ? place(this.src) : "")}`,
-          (cx) => { this.mode = "here"; this.task.focus(); cx.notify(); })))
+          (cx) => { this.mode = "here"; this.task.focus(); cx.notify(); }))
+        // from a Linear card: the shown space's repo instead of the last start's (and back)
+        .when(!!other, (el) => el.child(h_flex().id("new-other").w_full().h(26).px(12).gap(8).items_center().rounded(7).cursor_pointer()
+          .hover((st) => st.bg(C.hover)).on_click((_e, cx) => other.go(cx))
+          .child(mono(11, C.accent, "↪"))
+          .child(div().flex_none().font_family(SANS).text_size(12).text_color(C.soft).child(`New worktree of ${other.name}`))
+          .child(div().flex_1().min_w(0).truncate().child(mono(10, C.dim, this.dir ? "the shown space's repo" : "the repo of the last start"))))))
       .when(fresh, (el) => el
         .child(label("BRANCH"))
         .child(Input.new(this.branch).h(34).px(10).rounded(8).border(1).border_color(C.line2).bg(C.main).font_family(MONO).text_size(12).text_color(C.text))
@@ -2424,44 +2902,46 @@ export default class Board extends View {
       .child(Popup.new("new-issues", Input.new(this.ref).h(34).px(10).rounded(8).border(1).border_color(this.refFocused ? C.accentDim : C.line2).bg(C.main).font_family(SANS).text_size(12).text_color(C.text))
         .w_full().anchor("top_left")
         .when(this.refFocused && this.matches().length > 0, (el) => el.content(v_flex().w(504).mt(4).p(3).rounded(7).border(1).border_color(C.line2).bg(C.card)
-        .children(this.matches().map((i) => h_flex().id(`issue-${i.identifier}`).h(26).px(7).gap(8).items_center().rounded(5).cursor_pointer()
+        .children(this.matches().map((i) => h_flex().id(`issue-${i.project ? i.slugId : i.identifier}`).h(26).px(7).gap(8).items_center().rounded(5).cursor_pointer()
           .hover((st) => st.bg(C.raised))
           .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.addRef(cx, i); })
-          .child(div().w(70).flex_none().child(mono(11, REF_KINDS.linear[1], i.identifier)))
-          .child(div().flex_1().min_w(0).truncate().font_family(SANS).text_size(12).text_color(C.soft).child(i.title))
-          .child(mono(10, C.dim, i.state?.name ?? "")))))))
+          .child(div().w(70).flex_none().child(i.project ? mono(10, REF_KINDS.project[1], "PROJECT") : mono(11, REF_KINDS.linear[1], i.identifier)))
+          .child(div().flex_1().min_w(0).truncate().font_family(SANS).text_size(12).text_color(C.soft).child(i.project ? i.name : i.title))
+          .child(mono(10, C.dim, (i.project ? i.status?.name : i.state?.name) ?? "")))))))
       .child(h_flex().w_full().pt(6).flex_wrap().gap(6)
         .children(this.refs.map((r, n) => h_flex().id(`ref-${n}`).flex_none().max_w(470).h(24).pl(7).pr(4).gap(6).items_center().rounded(6)
           .border(1).border_color(`${REF_KINDS[r.kind][1]}55`).bg(`${REF_KINDS[r.kind][1]}14`)
-          .child(mono(10, REF_KINDS[r.kind][1], r.kind === "linear" ? r.id : REF_KINDS[r.kind][0]))
+          .child(mono(10, REF_KINDS[r.kind][1], r.kind === "linear" ? r.id : r.kind === "project" ? "Project" : REF_KINDS[r.kind][0]))
           .child(div().min_w(0).truncate().font_family(SANS).text_size(12).text_color(C.soft)
-            .child(r.kind === "linear" ? r.title ?? r.url ?? "" : r.kind === "pr" ? r.id : r.kind === "note" ? r.id : r.url.replace(/^https?:\/\//, "")))
+            .child(r.kind === "linear" ? r.title ?? r.url ?? "" : r.kind === "project" ? r.title ?? r.url.replace(/^https?:\/\//, "")
+              : r.kind === "pr" ? r.id : r.kind === "note" ? r.id : r.url.replace(/^https?:\/\//, "")))
           .child(div().id(`ref-x-${n}`).w(16).h(16).flex_none().rounded(4).flex().items_center().justify_center().cursor_pointer()
             .text_size(11).text_color(C.dim).hover((st) => st.bg(C.raised).text_color(C.text))
             .on_click((_e, cx) => { this.refs.splice(n, 1); cx.notify(); }).child("×"))))
-        .when(!this.refs.length, (el) => el.child(mono(10, C.dim, this.issues ? "⏎ adds · your Linear issues show as you type"
-          : "⏎ adds · set LINEAR_API_KEY in your shell to pick from your Linear issues"))))
-      // with a Linear issue: start on the orchestrator skill (opt-out)
-      .when(this.canOrchestrate && this.refs.some((r) => r.kind === "linear"), (el) => el.child(
-        h_flex().id("new-orchestrate").w_full().mt(10).h(42).px(12).gap(10).items_center().rounded(7).border(1)
-          .border_color(this.orchestrate ? C.accentDim : C.line2).bg(this.orchestrate ? "#1c1926" : "#00000000").cursor_pointer()
-          .hover((st) => st.bg(this.orchestrate ? "#1c1926" : C.hover))
-          .on_click((_e, cx) => { this.orchestrate = !this.orchestrate; this.task.focus(); cx.notify(); })
-          .child(div().w(14).h(14).flex_none().rounded(3).border(1).border_color(this.orchestrate ? C.accent : C.line2)
-            .bg(this.orchestrate ? C.accent : "#00000000").flex().items_center().justify_center()
-            .children(this.orchestrate ? [div().text_size(10).text_color("#0f0f11").child("✓")] : []))
-          .child(div().flex_none().font_family(SANS).text_size(13).text_color(C.text).child("Orchestrate"))
-          .child(div().flex_1().min_w(0).truncate().child(mono(11, C.dim, `/${this.skill} in Claude Code · its agents here`)))))
-      .child(label(orchestrating ? "WHAT THE ORCHESTRATOR SHOULD DO (REQUIRED)"
-        : this.refs.some((r) => r.kind === "linear") ? "MESSAGE (OPTIONAL: EMPTY STARTS ON THE ISSUE)" : "FIRST MESSAGE (OPTIONAL)"))
+        .when(!this.refs.length, (el) => el.child(mono(10, C.dim, this.issues ? "⏎ adds · your Linear issues and projects show as you type"
+          : "⏎ adds · set LINEAR_API_KEY in your shell to pick from Linear"))))
+      // the skills installed for this machine and repo, and None: the one on is automatic until you click one
+      .when(this.installed?.size > 0, (el) => el
+        .child(label("SKILL · RUNS IN CLAUDE CODE"))
+        .child(h_flex().w_full().flex_wrap().gap(6).children([null, ...this.cfg.skills.filter((s) => this.installed.has(s))].map((s) => {
+          const on = s === skill;
+          return h_flex().id(`new-skill-${s ?? "none"}`).h(26).px(9).items_center().rounded(6).border(1)
+            .border_color(on ? C.accent : C.line2).bg(on ? "#1c1926" : "#00000000").cursor_pointer()
+            .hover((st) => st.bg(on ? "#1c1926" : C.hover))
+            .on_click((_e, cx) => { this.skillPick = s; this.task.focus(); cx.notify(); })
+            .child(s ? mono(12, on ? C.text : C.soft, s) : div().font_family(SANS).text_size(12).text_color(on ? C.text : C.soft).child("None"));
+        }))))
+      .child(label(needsText ? "WHAT THE SKILL SHOULD DO (REQUIRED)"
+        : (skill ? this.refs.length > 0 : Boolean(issue || project)) ? `MESSAGE (OPTIONAL: EMPTY STARTS ON THE ${issue ? "ISSUE" : project ? "PROJECT" : "CONTEXT"})`
+        : "FIRST MESSAGE (OPTIONAL)"))
       .child(Input.new(this.task).h(38).px(10).rounded(8).border(1).border_color(C.line2).bg(C.main).font_family(SANS).text_size(13).text_color(C.text))
       .when(!!this.error, (el) => el.child(div().pt(8).child(mono(11, C.red, this.error))))
       .child(div().flex_1())
       .child(h_flex().pt(14).gap(8).items_center()
         .child(div().flex_1().min_w(0).truncate().child(mono(11, C.dim, this.busy ? "creating the worktree…"
-          : orchestrating && !this.text.trim() ? "say what the skill should do"
-          : orchestrating ? "it starts orchestrating; the board stays"
-          : this.prompt() ? "it starts working; the board stays" : "its terminal opens, to type in")))
+          : why ?? (needsText ? "say what the skill should do"
+          : skill ? `it starts on /${skill}; the board stays`
+          : this.prompt() ? "it starts working; the board stays" : "its terminal opens, to type in"))))
         .child(button("new-cancel", "Cancel", false, true, () => closeOverlay(props().overlay)))
         .child(button("new-start", this.busy ? "Creating…" : "Start  ⏎", true, ready, (_e, cx) => this.start(cx))));
   }
@@ -2476,10 +2956,16 @@ export default class Board extends View {
     const tab = !a && !side ? activeSpace()?.tabs?.find((t) => t.active) : null;
     const title = a ? agentTitle(a) ?? a.program?.name ?? a.address : tab?.name ?? activeSpace()?.name ?? "";
     const where = a ? a.space_name : tab ? activeSpace()?.name : null;
+    const sp = a ? spaces().find((x) => x.id === a.space) : activeSpace();
+    const iss = sp ? issueOf(sp.id, (shared(BRANCHES) ?? []).find((b) => b.space === sp.id)?.branch ?? sp.branch ?? null) : null;
     return h_flex().id("agent-head").size_full().px(10).gap(8).items_center().bg(C.top).border_b(1).border_color(C.line)
       .children(a ? [statusIcon(a.status, 8)] : [])
       .child(div().min_w(0).flex_shrink_1().font_family(SANS).text_size(12).text_color(C.text).child(trunc(title, 80)))
       .children(where && where !== title ? [div().min_w(0).flex_1().child(mono(10, C.dim, trunc(where, 40)))] : [div().flex_1()])
+      .when(!!iss, (el) => el.child(h_flex().id("head-linear").flex_none().h(22).px(8).items_center().rounded(5).cursor_pointer()
+        .border(1).border_color(C.line2).hover((st) => st.bg(C.hover))
+        .on_click((_e, cx) => cx.spawn(async () => { await exec("open", [iss.url]); }))
+        .child(div().font_family(SANS).text_size(12).text_color(C.soft).child("↗ Linear"))))
       .child(h_flex().id("minimize").flex_none().h(22).px(8).gap(6).items_center().rounded(5).cursor_pointer()
         .border(1).border_color(C.line2).hover((st) => st.bg(C.hover))
         .on_click(() => minimize(side))
@@ -2496,6 +2982,8 @@ export default class Board extends View {
     return h_flex().id("bottom").size_full().px(12).gap(16).items_center().bg(C.side).border_t(1).border_color(C.line)
       .child(div().flex_1())
       .when(!!c.problem, (el) => el.child(item(String(c.problem).slice(0, 80), C.red)))
+      .when(!!c.linearProblem, (el) => el.child(item(String(c.linearProblem).slice(0, 80), C.red)))
+      .when(!!c.linear, (el) => el.child(item(`linear: ${c.linear}`.slice(0, 80), C.red))) // the column keeps its last read
       .when(!!c.offline?.length, (el) => el.child(item(`${c.offline.join(", ")} offline`, C.muted, C.dim)))
       .child(item(c.when ? `read ${c.when}` : "reading…", C.dim))
       .child(item(new Date(this.now).toTimeString().slice(0, 5), C.muted));
