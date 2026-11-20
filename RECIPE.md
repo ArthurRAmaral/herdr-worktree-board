@@ -75,8 +75,12 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   - **A card**: a 3 px left bar in the worktree's status color; the project chip (one of 8 colors, from its name), the
     branch, a machine tag (its name, such as `devbox`, or `devbox · offline` dimmed) when it's on another machine, the
     stage button (`● In progress ▾`, tinted in the stage color); the title (14 px semibold); when it has them, a row of
-    20 px link pills under the title: `↗ ENG-12` (`#8b93f8`, opens the issue) and, in Planning, `📄 Plan ready`
-    (`#53cf91`, opens the plan); the agents
+    20 px link pills under the title: `↗ ENG-12` (`#8b93f8`, opens the issue), its other pull requests (one:
+    `↗ api#12`; several: `3 PRs ▾`, a scrollable list of `repo#n`, draft, checks and title, each opening on GitHub)
+    and, in Planning, `📄 Plan ready` (`#53cf91`, opens the plan); marked unread, a green bar and `● unread` by the
+    title. A right-click opens its menu at the pointer: `● Mark as unread  U` (or `○ Mark as read`), `⇅ Pull requests
+    (3)  P` when it has several, the stages, `× Delete worktree…  ⌫` (for a worktree under any machine's
+    `~/.herdr/worktrees`); a Linear card's: `↗ Open in Linear  O` and Planning / In progress; the agents
     counted (`2 waiting · 1 working`) and, with sub-agents, `· 3 sub-agents` counted too; up to 4 agent lines (status
     icon, program icon, what it says it's doing, a `+2` sub-agent pill, its age) and `+N more`; the question box; the
     facts (`3 commits`, `2 uncommitted`, `+120 −8`, `1 unpushed`, `PR #42`, `✓ checks` / `✗ checks` / `checks running`,
@@ -171,6 +175,13 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
     `{uuid, teamId, id}` in `boardh.linearMoves`; the board takes the team's `started` state with the lowest position
     and runs `issueUpdate(id, {stateId})`. A failure shows `<ID> not moved in Linear: <reason>` in red. Nothing else is
     written to Linear; labels are never touched.
+- **A worktree's pull requests** (pure rules in `worktree-prs.js`): its own branch's; the branch's of every folder its
+  agents work in (git and gh run there too); and, for each clone under its `repos/` (a folder with its own `.git`),
+  `gh pr list --author @me --state open` in that repo, kept when the PR's branch exists in that clone (a clone is the
+  worktree's own; a linked worktree's branches are shared, so only its checked-out one counts). Open ones only, each
+  once, its own first. Merge and Ship stay with its own branch's.
+- **Unread** (`boardh.unread`, space → when): your mark, set from the menu or `U`, cleared when any of its agents is
+  shown (beside the board, in its place, or to answer).
 - **Plans.** git's read of each worktree also looks for the newest `tmp/*/plan/report.md` or `report.html` (the HTML
   when both); a Planning card with one shows `📄 Plan ready`. A click opens a local HTML as it is; Markdown, or a file
   on another machine (read with `readTextFile(…, {on})`), is written as a page under `~/.config/herdr-app/cache/plans/`

@@ -4,7 +4,7 @@
 // props().part: "top" (the pinned Board tab with its needs-you badge, then the shown space's tabs), "nav" (the top of
 // the sidebar: + New agent, Board, who needs you, then every worktree grouped by stage, in the order you drag them to,
 // its agents under it; a click goes to the worktree's main agent, not a sub-agent it started there, or straight to an
-// agent, a right-click moves the worktree to another stage), "board"
+// agent, a right-click opens its menu: unread, stage, delete), "board"
 // (today's numbers, the next move, project chips, with LINEAR_API_KEY a Linear column of your issues waiting to start,
 // then one column per stage) and "bottom" (when the board last read, any git, gh or Linear problem, the clock). "new"
 // is the New agent dialog: a new worktree of the shown repo with the agent in it,
@@ -59,6 +59,7 @@ import { PrsFeed, PRS, PR_ASK, PR_DRAFTS } from "./prs-data.js";
 import { PrsBoard, PrsSettings, PRS_SHOWN } from "./prs.js";
 import { lanes } from "./prs-rules.js";
 import { planPage } from "./md-html.js";
+import { checks, parseClonePrs, mergePrs } from "./worktree-prs.js";
 import { mainAgent, addNew, moveKey, toFront, byOrder, seq } from "./nav-order.js";
 import { readBoardConfig, firstMessage, moveInLinear, todoColumn, canDrop, issueFromBranch, startedState } from "./linear-rules.js";
 
@@ -127,6 +128,7 @@ const ORDER = "boardh.order"; // shared: the sidebar's order, space ids and agen
 const FOLD = "boardh.fold"; // shared: the sidebar's folded groups
 const SCOPE = "boardh.scope"; // shared: "all", or anything else for the shown space's repo
 const MACHINE = "boardh.machine"; // shared: the machine filter: null for every one, "" this computer, else a machine's name
+const UNREAD = "boardh.unread"; // shared: space id -> when you marked that worktree unread, to see later (green until opened)
 const SHOWN = "boardh.shown"; // shared: the agent the board last showed beside it, for the bar over it
 const PEEK = "boardh.peek"; // shared: Space shows the selected agent beside the board (the top bar then keeps the board)
 const COL = "boardh.col"; // shared: {kind, at}, the stage the sidebar last opened the board on (kind null: none)
@@ -160,7 +162,9 @@ echo "unpushed=$(git rev-list --count @{u}..HEAD 2>/dev/null)"
 r=$(git rev-parse --show-toplevel)
 f=$(ls -t "$r"/tmp/*/plan/report.md "$r"/tmp/*/plan/report.html 2>/dev/null | head -n 1)
 [ -n "$f" ] && [ -f "\${f%/*}/report.html" ] && f="\${f%/*}/report.html"
-echo "plan=$f"`;
+echo "plan=$f"
+# its own clones under repos/ (a folder of their own, not a worktree), whose branches can have pull requests too
+for c in "$r"/repos/*/; do [ -d "$c.git" ] && echo "clone=\${c%/}"; done`;
 
 // New agent's: the repo a folder is in, the branch a new worktree starts from, and the home the worktrees go under
 // a reference New agent puts in the agent's first message: what it is, from what you paste
@@ -247,6 +251,12 @@ function issueOf(spaceId, branch) {
   return id && org?.urlKey ? { id, url: `https://linear.app/${org.urlKey}/issue/${id}` } : null;
 }
 
+// a clone's local branches, then your open pull requests in its repo (parseClonePrs keeps the ones from those branches)
+const CLONE_PRS = `cd "$1" 2>/dev/null || exit 3
+git for-each-ref --format='%(refname:short)' refs/heads
+echo ---
+gh pr list --author @me --state open --limit 50 --json number,url,title,isDraft,headRefName,statusCheckRollup 2>/dev/null`;
+
 const REPO = `cd "$1" 2>/dev/null || exit 3
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
 echo "top=$(git rev-parse --show-toplevel)"
@@ -313,16 +323,8 @@ function parseGit(stdout) {
     unpushed: int(v.unpushed),
     lines: v.diff ? { added: ins ? Number(ins[1]) : 0, removed: del ? Number(del[1]) : 0 } : null,
     plan: v.plan || null,
+    clones: String(stdout ?? "").split("\n").filter((l) => l.startsWith("clone=")).map((l) => l.slice(6).trim()).filter(Boolean),
   };
-}
-
-// a pull request's checks in one word: FAIL, pending, pass, or null when it has none
-function checks(rollup) {
-  if (!Array.isArray(rollup) || !rollup.length) return null;
-  const word = (c) => String(c.conclusion || c.state || c.status || "").toUpperCase();
-  if (rollup.some((c) => ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"].includes(word(c)))) return "FAIL";
-  if (rollup.some((c) => ["", "PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "EXPECTED"].includes(word(c)))) return "pending";
-  return "pass";
 }
 
 // what a blocked agent asks: the lowest line on its screen that ends a question
@@ -345,6 +347,9 @@ function place(s, paneList = panes()) {
 // where Herdr's worktree mod and New agent put worktrees; only these are ever removed, never a main checkout
 const WT_ROOT = () => `${home()}/.herdr/worktrees/`;
 const isWorktree = (s) => !s.machine && [place(s), s.folder].some((d) => d?.startsWith(WT_ROOT()));
+// one you can remove by hand: also on another machine (its ~/.herdr/worktrees, whatever its home); Herdr's Remove
+// worktree runs git there and refuses a main checkout itself. Done's automatic removal stays with this computer's
+const removable = (s) => isWorktree(s) || Boolean(s.machine && [place(s), s.folder].some((d) => d?.includes("/.herdr/worktrees/")));
 // the space showing a folder (its terminals are in it), if one is open
 const showing = (folder, on) => spaces().find((x) => (x.machine ?? undefined) === (on ?? undefined)
   && [place(x), x.folder].some((d) => d === folder || d?.startsWith(folder + "/")));
@@ -361,7 +366,7 @@ const parseTrees = (stdout) => String(stdout ?? "").split(/\n\n+/).map((block) =
 function closeTab() {
   if (shownView() !== "work") return;
   const s = spaces().find((x) => x.id === focused()?.space) ?? activeSpace();
-  if (s && s.tabs.length <= 1 && isWorktree(s)) deleteWorktree(s.id);
+  if (s && s.tabs.length <= 1 && removable(s)) deleteWorktree(s.id);
   else run("tab.close", {});
 }
 
@@ -532,17 +537,38 @@ function editIssue(p) {
 
 // the stage picker: at the pointer for a click, centered for a key; for a Linear card (issue), only the stages it can
 // start in (only), and a pick opens its summary
-function openStagePicker(space, title, stage, pointer, { only, issue } = {}) {
-  const deletable = !issue && Boolean(spaces().find((s) => s.id === space && isWorktree(s)));
-  openOverlay({ mod: MOD, props: { part: "stage", space, title, stage, deletable, only, issue }, kind: pointer ? "popup" : "dialog",
-    width: 250, height: 44 + (only?.length ?? STAGES.length) * 30 + (deletable ? 40 : 0) });
+// menu: a right-click's, with an action on top: Mark as unread / read for a worktree, Open in Linear for an issue
+function openStagePicker(space, title, stage, pointer, { only, issue, menu, prs } = {}) {
+  const deletable = !issue && Boolean(spaces().find((s) => s.id === space && removable(s)));
+  // the actions on top: Mark as unread / read or Open in Linear, and a worktree's pull requests when it has several
+  const actions = menu ? [issue ? (issue.url ? "open" : null) : "unread", prs?.length > 1 ? "prs" : null].filter(Boolean) : [];
+  openOverlay({ mod: MOD, props: { part: "stage", space, title, stage, deletable, only, issue, actions, prs: actions.includes("prs") ? prs : null },
+    kind: pointer ? "popup" : "dialog",
+    width: 250, height: 44 + (only?.length ?? STAGES.length) * 30 + (deletable ? 40 : 0) + (actions.length ? actions.length * 30 + 10 : 0) });
 }
+
+// a worktree's pull requests, when it has more than one: a list at the pointer (or centered), each opens on GitHub
+function openPrList(title, prs, pointer) {
+  openOverlay({ mod: MOD, props: { part: "prlist", title, prs }, kind: pointer ? "popup" : "dialog",
+    width: 420, height: Math.min(380, 44 + prs.length * 46) });
+}
+
+// unread: your own mark on a worktree, to come back to it; opening any of its agents clears it
+const isUnread = (spaceId) => Boolean((shared(UNREAD) ?? {})[spaceId]);
+function setUnread(spaceId, on) {
+  const u = shared(UNREAD) ?? {};
+  if (!spaceId || Boolean(u[spaceId]) === on) return;
+  const { [spaceId]: _, ...rest } = u;
+  setShared(UNREAD, on ? { ...rest, [spaceId]: Date.now() } : rest);
+}
+// an agent opened (beside the board, in its place, or to answer): its worktree is read
+const seen = (address) => setUnread(agents().find((a) => a.address === address)?.space, false);
 
 // Delete worktree: Herdr's own Remove worktree (it warns about uncommitted changes, closes the space and runs git
 // worktree remove; the branch and its commits stay). Only for worktrees under ~/.herdr/worktrees, never a main checkout.
 function deleteWorktree(spaceId) {
   const s = spaces().find((x) => x.id === spaceId);
-  if (s && isWorktree(s)) openOverlay({ mod: "worktree", kind: "dialog", width: 440, height: 260, props: { space: s.id, action: "remove" } });
+  if (s && removable(s)) openOverlay({ mod: "worktree", kind: "dialog", width: 440, height: 260, props: { space: s.id, action: "remove" } });
 }
 
 // Minimize on the bar over an agent: beside the board (Peek or Focus), the side closes; in the board's place, the board
@@ -571,6 +597,7 @@ function showWork() {
 // an agent's terminal, with the keyboard
 function goToAgent(address) {
   closeSide();
+  seen(address);
   run("agent.focus", { terminal: address });
   setShared(SHOWN, address);
   run("pane.focus", { terminal: address });
@@ -581,6 +608,7 @@ function goToAgent(address) {
 function goToWorktree(w) {
   if (w.main) { goToAgent(w.main.a.address); return; }
   closeSide();
+  setUnread(w.key, false);
   run("space.select", { id: w.key });
   showWork();
 }
@@ -655,6 +683,7 @@ export default class Board extends View {
     if (this.part === "stage") { this.initStage(cx); return; }
     if (this.part === "cleanup") { this.initCleanup(cx); return; }
     if (this.part === "prs-settings") { this.prsSet = new PrsSettings(); this.prsSet.init(cx); return; }
+    if (this.part === "prlist") { this.at = 0; this.h = cx.focus_handle(); this.h.focus(); cx.timer.after(300, () => this.h.focus()); return; }
     if (this.part === "prs") {
       this.prsUi = new PrsBoard({ agentFor: worktreeOn, settings: openPrsSettings, refocused: () => shared(REFOCUS) ?? 0,
         openSpace: (id) => { const w = worktrees().find((x) => x.key === id); if (w) goToWorktree(w); } });
@@ -708,6 +737,8 @@ export default class Board extends View {
     this.git = {}; // folder -> parseGit() or null (not a repo)
     this.prs = {}; // "common|branch" -> {number, url, state, checks, merge, draft} or null (none)
     this.prAt = {}; // "common|branch" -> when it was last asked
+    this.clonePrs = {}; // a clone under a worktree's repos/ -> its open pull requests from its branches
+    this.cloneAt = {}; // and when they were last asked
     this.offGithub = new Set(); // repos (git common dir) whose remotes aren't on GitHub
     this.merged = []; // closedAt (ms) of my pull requests merged in the last 7 days
     this.problem = null; // the last git or gh error
@@ -769,7 +800,12 @@ export default class Board extends View {
       const cwd = place(w.space, paneList);
       const g = cwd ? this.git[cwd] : null;
       const pr = g?.branch ? this.prs[`${g.common}|${g.branch}`] ?? null : null;
-      return { ...w, cwd, git: g, pr, machine: w.space.machine ?? null, project: g?.project ?? w.space.name,
+      // every pull request of the worktree: its own, its clones', its agents' folders'
+      const prOf = (d) => { const x = this.git[d]; return x?.branch ? this.prs[`${x.common}|${x.branch}`] ?? null : null; };
+      const folders = [...new Set(w.agents.map((x) => paneList.find((p) => p.pane === x.a.pane)?.cwd).filter((d) => d && d !== cwd))];
+      const prList = mergePrs(pr, [folders.map(prOf), ...(g?.clones ?? []).map((c) => this.clonePrs[c] ?? [])])
+        .filter((p) => p.state === "OPEN");
+      return { ...w, cwd, git: g, pr, prList, machine: w.space.machine ?? null, project: g?.project ?? w.space.name,
         branch: g?.branch ?? w.space.branch ?? null };
     });
   }
@@ -793,6 +829,11 @@ export default class Board extends View {
         const paneList = panes();
         const where = new Map();
         for (const s of spaces()) { const d = place(s, paneList); if (d) where.set(d, s.machine ?? null); }
+        // the folders its agents work in, when not the worktree's own (an implementer in another repo's worktree):
+        // their branch's pull request is the worktree's too
+        const machineOf = new Map(spaces().map((s) => [s.id, s.machine ?? null]));
+        const cwdOf = new Map(paneList.map((p) => [p.pane, p.cwd]));
+        for (const a of agents()) { const d = cwdOf.get(a.pane); if (d && !where.has(d)) where.set(d, machineOf.get(a.space) ?? null); }
         let problem = null;
         // a machine Herdr can't reach is a state, not an error to fix here: no git or gh there this round (each try
         // waits out its timeout), and its cards keep what was last read
@@ -819,6 +860,18 @@ export default class Board extends View {
           } catch { /* a repo on another machine, or gone */ }
         }
         this.orphans = orphans;
+        // each worktree's clones under repos/: your open pull requests from their branches, as often as a branch's
+        const clones = new Map();
+        for (const [dir, on] of where) for (const c of this.git[dir]?.clones ?? []) clones.set(c, on);
+        for (const [c, on] of clones) {
+          if (on && down.has(on)) continue;
+          if (!force && this.clonePrs[c] && Date.now() - (this.cloneAt[c] ?? 0) < GH_MS) continue;
+          this.cloneAt[c] = Date.now();
+          try {
+            const r = await exec("sh", ["-c", CLONE_PRS, "sh", c], { on, timeout: 30000 });
+            if (r.code === 0) this.clonePrs[c] = parseClonePrs(r.stdout);
+          } catch (e) { cut(on, e); }
+        }
         // one pull request lookup per branch that isn't the default one
         const branches = new Map();
         for (const [dir, on] of where) {
@@ -830,10 +883,10 @@ export default class Board extends View {
           if (!force && this.prs[key] !== undefined && Date.now() - (this.prAt[key] ?? 0) < GH_MS) continue;
           this.prAt[key] = Date.now();
           try {
-            const r = await exec("gh", ["pr", "view", g.branch, "--json", "number,url,state,isDraft,mergeStateStatus,statusCheckRollup"], { cwd: g.root, on });
+            const r = await exec("gh", ["pr", "view", g.branch, "--json", "number,url,title,state,isDraft,mergeStateStatus,statusCheckRollup"], { cwd: g.root, on });
             if (r.code === 0) {
               const p = JSON.parse(r.stdout);
-              this.prs[key] = { number: p.number, url: p.url, state: p.state, draft: p.isDraft, merge: p.mergeStateStatus, checks: checks(p.statusCheckRollup) };
+              this.prs[key] = { number: p.number, url: p.url, title: p.title, state: p.state, draft: p.isDraft, merge: p.mergeStateStatus, checks: checks(p.statusCheckRollup) };
             } else if (/no pull requests found/i.test(r.stderr ?? "")) this.prs[key] = null;
             // a repo whose remotes aren't on GitHub: no pull requests to look for, and nothing to ship
             else if (/known GitHub host|no git remotes/i.test(r.stderr ?? "")) { this.prs[key] = null; this.offGithub.add(g.common); }
@@ -1124,6 +1177,7 @@ export default class Board extends View {
 
   // an agent in the focus-term block, the keyboard staying on the board
   show(cx, address) {
+    seen(address);
     run("agent.focus", { terminal: address });
     setShared(SHOWN, address);
     this.grab(cx);
@@ -1132,6 +1186,7 @@ export default class Board extends View {
   // shows the agent in the focus-term block and gives that block the keyboard (pane.focus prefers a visible layout
   // terminal block showing the address), so typing answers it
   answerIn(address) {
+    seen(address);
     run("agent.focus", { terminal: address });
     setShared(SHOWN, address);
     run("pane.focus", { terminal: address });
@@ -1351,6 +1406,7 @@ export default class Board extends View {
     else if (k === "?" || (k === "/" && m.shift)) { this.help = !this.help; cx.notify(); }
     else if (k === "/") this.search.focus();
     else if (k === "a" && t) { this.archive(t); cx.notify(); }
+    else if (k === "u" && t) { setUnread(t.key, !isUnread(t.key)); cx.notify(); }
     else if (k === "r") toggleAsks();
     else if (k === "y" && t && this.recommended(t)) { const [q, o] = this.recommended(t); this.answerer.answer(q, o, cx); }
     else if (k === "m" && this.landMove(t)) this.ask(cx, t, this.landMove(t));
@@ -1368,7 +1424,7 @@ export default class Board extends View {
     const KEYS = [
       ["↑ ↓  j k", "move within a column"], ["← →  h l", "move across columns"], ["1 – 9", "first card of a stage"],
       ["0", "the Linear column"],
-      ["S  drag", "change the stage, or the order"], ["⇧← ⇧→", "stage before / after"], ["A", "archive / unarchive"], ["⌫", "delete the worktree"],
+      ["S  drag", "change the stage, or the order"], ["⇧← ⇧→", "stage before / after"], ["A", "archive / unarchive"], ["U  right-click", "mark unread / the card's menu"], ["⌫", "delete the worktree"],
       ["Click", "its agent beside the board"], ["⏎  double-click", "open the worktree's agent"],
       ["⏎ on an issue", "start it"], ["Space", "show / hide the side"],
       ["F", "Focus: answer what needs you"],
@@ -1404,6 +1460,7 @@ export default class Board extends View {
     if (this.part === "prs-settings") return this.prsSet.render(cx);
     if (this.part === "new") return this.summary ? this.summaryDialog() : this.newDialog();
     if (this.part === "stage") return this.stagePicker();
+    if (this.part === "prlist") return this.prListView();
     if (this.part === "cleanup") return this.cleanupDialog();
     if (this.part === "board") return this.board(cx);
     return div().child(`board-herdr: unknown part ${this.part}`);
@@ -1530,6 +1587,8 @@ export default class Board extends View {
     const openPr = pr ? (el) => el.child(this.btn(`pr-${t.key}`, `PR #${pr.number} ↗`, "plain", (cx) => cx.spawn(async () => { await exec("open", [pr.url]); }))) : (el) => el;
     const subs = t.subs.map(subStatus);
     const iss = issueOf(t.key, t.branch);
+    const unread = isUnread(t.key);
+    const others = t.prList.filter((p) => p.url !== pr?.url);
     const left = this.doneLeft(t);
     if (left !== null) facts.push(g?.dirty ? ["uncommitted: won't auto-delete", C.you] : [left ? `deletes in ${dur(left)}` : "deleting…", C.muted]);
 
@@ -1580,19 +1639,30 @@ export default class Board extends View {
       .on_hover((on, cx) => { if (!on && this.dropNear?.key === t.key) { this.dropNear = null; cx.notify(); } })
       .when(this.dragCard === t.key && Boolean(this.dropCol || this.dropNear), (el) => el.opacity(0.45))
       .on_click((e, cx) => (e.click_count === 2 ? this.goTo(cx, t) : this.pick(cx, t.key, true)))
-      .child(div().w(3).flex_none().bg(statusColor(t.status)))
+      .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.cancelDrag(); this.sel = t.key; cx.notify();
+        openStagePicker(t.key, t.name, t.stage, true, { menu: true, prs: t.prList }); })
+      .child(div().w(3).flex_none().bg(statusColor(unread ? "done" : t.status)))
       .child(v_flex().flex_1().min_w(0).px(11).py(9).gap(5)
       .child(h_flex().w_full().gap(6).items_center()
         .child(chip(t.project))
         .when(!!t.machine, (el) => el.child(machineTag(t.machine)))
         .child(div().flex_1().min_w(0).truncate().font_family(MONO).text_size(11).text_color(C.dim).child(t.branch ?? ""))
         .child(this.stageButton(t)))
-      .child(div().font_family(SANS).text_size(14).font_weight(600).text_color(C.text).child(t.name))
+      .child(h_flex().w_full().gap(8).items_start()
+        .child(div().flex_1().min_w(0).font_family(SANS).text_size(14).font_weight(600).text_color(C.text).child(t.name))
+        // marked unread: green, as a finished agent, until one of its agents is opened
+        .when(unread, (el) => el.child(h_flex().flex_none().pt(3).gap(5).items_center()
+          .child(div().w(7).h(7).rounded(4).bg(C.land)).child(mono(10, C.land, "unread")))))
       // its links, on a row of their own so the stage button above always fits: the Linear issue, and in Planning the
       // plan its skill wrote, to read in the browser
-      .when(!!iss || (t.stage === "todo" && !!g?.plan), (el) => el.child(h_flex().w_full().flex_wrap().gap(6).items_center()
+      .when(!!iss || (t.stage === "todo" && !!g?.plan) || others.length > 0, (el) => el.child(h_flex().w_full().flex_wrap().gap(6).items_center()
         .when(!!iss, (el) => el.child(this.linkPill(`iss-${t.key}`, `↗ ${iss.id}`, REF_KINDS.linear[1],
           (cx) => cx.spawn(async () => { await exec("open", [iss.url]); }))))
+        // the pull requests it has besides its own branch's (that one is in the facts): one opens, more list
+        .when(others.length === 1 && !pr, (el) => el.child(this.linkPill(`prs-${t.key}`, `↗ ${others[0].repo?.split("/").pop() ?? "PR"}#${others[0].number}`,
+          C.accent, (cx) => cx.spawn(async () => { await exec("open", [others[0].url]); }))))
+        .when(t.prList.length > 1, (el) => el.child(this.linkPill(`prs-${t.key}`, `${t.prList.length} PRs ▾`, C.accent,
+          () => openPrList(t.name, t.prList, true))))
         .when(t.stage === "todo" && !!g?.plan, (el) => el.child(this.linkPill(`plan-${t.key}`, "📄 Plan ready", C.land,
           (cx) => cx.spawn(async () => {
             try { await openPlan(g.plan, t.machine, `${iss?.id ?? t.name} plan`); }
@@ -1628,6 +1698,8 @@ export default class Board extends View {
       .on_mouse_down("left", () => { this.dragCard = it.key; this.dropCol = null; this.dropNear = null; })
       .when(this.dragCard === it.key && Boolean(this.dropCol), (el) => el.opacity(0.45))
       .on_click((_e, cx) => this.pick(cx, it.key))
+      .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.cancelDrag(); this.sel = it.key; cx.notify();
+        openStagePicker(null, i.identifier, null, true, { only: ["todo", "in_progress"], issue: issueRef(i), menu: true }); })
       .child(div().w(3).flex_none().bg(REF_KINDS.linear[1]))
       .child(v_flex().flex_1().min_w(0).px(11).py(9).gap(5)
         .child(h_flex().w_full().gap(6).items_center()
@@ -2001,12 +2073,12 @@ export default class Board extends View {
   // moves it in the list
   worktreeRow(w, cur) {
     const on = w.agents.some((x) => x.a.address === cur) || (!w.agents.length && w.space.active);
-    const st = w.agents.length ? w.status ?? "idle" : null;
+    const st = isUnread(w.key) ? "done" : w.agents.length ? w.status ?? "idle" : null; // unread: green until opened
     const waiting = w.needs.length, working = w.agents.filter((x) => x.a.status === "working").length;
     const row = h_flex().id(`wt-${w.key}`).w_full().h(30).flex_none().pl(8).pr(8).gap(8).items_center().rounded(6).cursor_pointer()
       .bg(on ? "#2c2838" : "#00000000").hover((s) => s.bg(on ? "#2c2838" : C.hover))
       .on_click(() => goToWorktree(w))
-      .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); openStagePicker(w.key, w.name, w.stage, true); })
+      .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); openStagePicker(w.key, w.name, w.stage, true, { menu: true }); })
       .when(this.drag?.key === w.key && Boolean(this.over), (el) => el.opacity(0.45))
       .child(div().w(12).flex_none().flex().justify_center().child(st ? statusIcon(st, 8) : icon("columns", 10, C.dim)))
       .child(div().flex_1().min_w(0).truncate().font_family(SANS).text_size(13).font_weight(500)
@@ -2029,7 +2101,7 @@ export default class Board extends View {
     const row = h_flex().id(`ag-${a.address}`).w_full().h(26).flex_none().pl(28).pr(8).gap(7).items_center().rounded(6).cursor_pointer()
       .bg(on ? "#2c2838" : "#00000000").hover((s) => s.bg(on ? "#2c2838" : C.hover))
       .on_click(() => goToAgent(a.address))
-      .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); openStagePicker(w.key, w.name, w.stage, true); })
+      .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); openStagePicker(w.key, w.name, w.stage, true, { menu: true }); })
       .when(this.drag?.key === a.address && Boolean(this.over), (el) => el.opacity(0.45))
       .child(div().w(10).flex_none().flex().justify_center().child(statusIcon(a.status, 7)))
       .child(div().flex_1().min_w(0).truncate().font_family(SANS).text_size(12)
@@ -2179,14 +2251,14 @@ export default class Board extends View {
         .on_mouse_up("left", (_e, cx) => this.drop(cx))
         .on_hover((on, cx) => { if (!on && this.drag) { this.drag = null; this.over = null; cx.notify(); } })
         .children(STAGES.map(group))
-        .child(div().px(8).pt(6).child(mono(10, C.dim, "drag to reorder · right-click for the stage"))));
+        .child(div().px(8).pt(6).child(mono(10, C.dim, "drag to reorder · right-click for the menu"))));
   }
 
-  // the stage picker and New agent, closing (Esc, a pick, a click beside): the board takes the keyboard back, unless
+  // the stage picker, New agent and the pull requests list, closing (Esc, a pick, a click beside): the board takes the keyboard back, unless
   // another dialog takes over from this one (a Linear card's stage, the summary's E, the dialog's Esc back)
   async close() {
     if (this.handoff) return;
-    if (this.part === "stage" || this.part === "new" || this.part === "cleanup" || this.part === "prs-settings") setShared(REFOCUS, Date.now());
+    if (["stage", "new", "cleanup", "prs-settings", "prlist"].includes(this.part)) setShared(REFOCUS, Date.now());
   }
 
   // ---- leftover worktrees -----------------------------------------------------------------------------------
@@ -2279,10 +2351,42 @@ export default class Board extends View {
 
   initStage(cx) {
     const p = props() ?? {};
-    this.at = Math.max(0, this.stages().findIndex(([k]) => k === p.stage));
+    this.at = Math.max(0, this.stages().findIndex(([k]) => k === p.stage)); // -1: the action row on top
     this.h = cx.focus_handle();
     this.h.focus();
     cx.timer.after(300, () => this.h.focus());
+  }
+
+  // a worktree's pull requests: repo#number, title, draft or open, checks; ⏎ or a click opens one
+  prListView() {
+    const p = props() ?? {}, list = p.prs ?? [];
+    const open = (x) => { closeOverlay(p.overlay); exec("open", [x.url]); };
+    const check = (c) => (c === "pass" ? ["✓ checks", C.land] : c === "FAIL" ? ["✗ checks", C.red] : c === "pending" ? ["checks running", C.you] : null);
+    return v_flex().id("prlist").size_full().p(5).bg("#18181b").track_focus(this.h)
+      .on_key_down((e, cx) => {
+        const k = e.key;
+        if (k === "down" || k === "j") this.at = Math.min(list.length - 1, this.at + 1);
+        else if (k === "up" || k === "k") this.at = Math.max(0, this.at - 1);
+        else if (k === "enter" && list[this.at]) open(list[this.at]);
+        else if (k === "escape") closeOverlay(p.overlay);
+        else return;
+        cx.stop_propagation();
+        cx.notify();
+      })
+      .child(div().px(9).pt(6).pb(6).truncate().child(mono(10, C.dim, `PULL REQUESTS · ${trunc(String(p.title ?? ""), 30)}`)))
+      .child(v_flex().id("prlist-rows").flex_1().min_h(0).overflow_y_scrollbar().children(list.map((x, i) => {
+        const c = check(x.checks);
+        return v_flex().id(`pr-${i}`).w_full().flex_none().px(9).py(5).gap(2).rounded(6).cursor_pointer()
+          .bg(i === this.at ? C.raised : "#00000000").hover((st) => st.bg(C.raised))
+          .on_click(() => open(x))
+          .child(h_flex().w_full().gap(8).items_center()
+            .child(mono(11, C.accent, `${x.repo ?? ""}#${x.number}`))
+            .when(!!x.draft, (el) => el.child(mono(10, C.dim, "draft")))
+            .child(div().flex_1())
+            .when(!!c, (el) => el.child(mono(10, c[1], c[0])))
+            .child(mono(11, C.dim, "↗")))
+          .child(div().w_full().truncate().font_family(SANS).text_size(12).text_color(C.text).child(x.title ?? x.url));
+      })));
   }
 
   // the stages it offers: a Linear card's (only), else every one
@@ -2294,6 +2398,9 @@ export default class Board extends View {
   // a Linear card's stage opens its summary there; a worktree's stage is set
   choose(stage) {
     const p = props() ?? {};
+    if (stage === "unread") { closeOverlay(p.overlay); setUnread(p.space, !isUnread(p.space)); return; }
+    if (stage === "open") { closeOverlay(p.overlay); if (p.issue?.url) exec("open", [p.issue.url]); return; }
+    if (stage === "prs") { this.handoff = true; closeOverlay(p.overlay); openPrList(p.title, p.prs ?? [], false); return; }
     if (p.issue) {
       if (!stage || stage === "delete") return;
       this.handoff = true;
@@ -2314,16 +2421,37 @@ export default class Board extends View {
       .on_key_down((e, cx) => {
         const k = e.key;
         const last = list.length - (p.deletable ? 0 : 1); // Delete worktree comes after the stages
+        const acts = p.actions ?? [], first = -acts.length;
         if (e.is_held && p.issue && (k === "enter" || /^[1-9]$/.test(k))) { cx.stop_propagation(); return; } // a held key would start it
         if (/^[1-9]$/.test(k) && list[Number(k) - 1]) this.choose(list[Number(k) - 1][0]);
         else if (k === "down" || k === "j") this.at = Math.min(last, this.at + 1);
-        else if (k === "up" || k === "k") this.at = Math.max(0, this.at - 1);
-        else if (k === "enter") this.choose(list[this.at]?.[0] ?? "delete");
+        else if (k === "up" || k === "k") this.at = Math.max(first, this.at - 1);
+        else if (k === "enter") this.choose(this.at < 0 ? acts[acts.length + this.at] : list[this.at]?.[0] ?? "delete");
+        else if (k === "u" && acts.includes("unread")) this.choose("unread");
+        else if (k === "o" && acts.includes("open")) this.choose("open");
+        else if (k === "p" && acts.includes("prs")) this.choose("prs");
         else if ((k === "backspace" || k === "delete") && p.deletable) this.choose("delete");
         else if (k === "escape") closeOverlay(p.overlay);
         else return;
         cx.stop_propagation();
         cx.notify();
+      })
+      .when((p.actions ?? []).length > 0, (el) => {
+        const acts = p.actions;
+        const look = (a) => (a === "open" ? ["↗", "Open in Linear", "O", REF_KINDS.linear[1]]
+          : a === "prs" ? ["⇅", `Pull requests (${p.prs?.length ?? 0})`, "P", C.accent]
+          : isUnread(p.space) ? ["○", "Mark as read", "U", C.land] : ["●", "Mark as unread", "U", C.land]);
+        return el
+          .children(acts.map((a, i) => {
+            const [mark, label, key, color] = look(a);
+            return h_flex().id(`st-${a}`).h(30).flex_none().px(9).gap(10).items_center().rounded(6)
+              .bg(this.at === i - acts.length ? C.raised : "#00000000").cursor_pointer().hover((st) => st.bg(C.raised))
+              .on_click(() => this.choose(a))
+              .child(div().w(8).flex_none().text_size(11).text_color(color).child(mark))
+              .child(div().flex_1().font_family(SANS).text_size(13).text_color(C.text).child(label))
+              .child(mono(11, C.dim, key));
+          }))
+          .child(div().h(1).mx(6).my(4).bg(C.line2));
       })
       .child(div().px(9).pt(6).pb(6).truncate().child(mono(10, C.dim, p.issue ? `START ${trunc(title, 24)} IN` : `MOVE ${trunc(title, 24)} TO`)))
       .children(list.map(([k, label, color], i) => h_flex().id(`st-${k}`).h(30).flex_none().px(9).gap(10).items_center().rounded(6)

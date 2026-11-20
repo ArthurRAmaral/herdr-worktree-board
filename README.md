@@ -8,7 +8,8 @@ Archived, Paused. Stages are labels you pick; only two act: Done removes the wor
 its tabs away. A card shows:
 
 - every agent working in that worktree, and the sub-agents they started, counted by status;
-- its branch, commits, uncommitted lines, pull request and checks;
+- its branch, commits, uncommitted lines, pull request and checks; when its agents opened more pull requests (in
+  clones under the worktree's `repos/`, or from another folder), `3 PRs ▾` lists them all;
 - the question an agent is waiting on, with every option in full to click (its column widens to fit them);
 - the machine it is on, when that isn't this one: a tag with the machine's name, such as `devbox`, and
   `devbox · offline` while Herdr can't reach it;
@@ -18,6 +19,9 @@ its tabs away. A card shows:
 The sidebar lists the worktrees by stage, each with its agents, in the order you drag them to. A click on a worktree
 goes to its main agent, not a sub-agent that agent started.
 
+- **Right-click a card** for its menu: Mark as unread (the card stays green, as a finished agent, until you open one
+  of its agents; `U` does it too), its pull requests when it has several, its stage, and Delete worktree (also on
+  another machine; Herdr's own Remove worktree asks first). A Linear card's menu opens it in Linear or starts it.
 - **Drag**: a card to another column changes its stage; within a column, it changes its place. Drag the board's
   background to scroll it sideways, as in Linear.
 - **An agent beside the board**: a click on a card shows its agent's terminal at the right, and the board stays
@@ -115,7 +119,8 @@ Mods are trusted code. This one:
   machine's login (a machine Herdr can't reach is skipped until it's back);
 - runs `git` in each worktree's folder: `status`, `rev-list` and `diff --shortstat`, plus
   `worktree add|list|remove|prune` from New agent, Done and the cleanup;
-- runs `gh` for each branch's pull request and checks, your PRs merged this week, and Merge PR / Ship PR
+- runs `gh` for each branch's pull request and checks (also for the folders a worktree's agents work in, and `gh pr
+  list` of your open PRs in each clone under its `repos/`), your PRs merged this week, and Merge PR / Ship PR
   (`gh pr merge`, `git push -u origin HEAD && gh pr create --fill`), only when you click or press M and confirm;
 - runs `gh api graphql` for the PRs view, every 3 minutes while the layout is shown. It searches the open PRs of the
   org in `prs.json` (yours, asking your review, reviewed by you, and your team repos'), and reads those repos'
