@@ -164,7 +164,8 @@ f=$(ls -t "$r"/tmp/*/plan/report.md "$r"/tmp/*/plan/report.html 2>/dev/null | he
 [ -n "$f" ] && [ -f "\${f%/*}/report.html" ] && f="\${f%/*}/report.html"
 echo "plan=$f"
 # its own clones under repos/ (a folder of their own, not a worktree), whose branches can have pull requests too
-for c in "$r"/repos/*/; do [ -d "$c.git" ] && echo "clone=\${c%/}"; done`;
+# (an if, not &&: a last folder that isn't a clone would end the script non-zero, and the board drops such a read)
+for c in "$r"/repos/*/; do if [ -d "$c.git" ]; then echo "clone=\${c%/}"; fi; done`;
 
 // New agent's: the repo a folder is in, the branch a new worktree starts from, and the home the worktrees go under
 // a reference New agent puts in the agent's first message: what it is, from what you paste
@@ -302,7 +303,8 @@ function dur(ms) {
 const chipColor = (name) => CHIPS[[...String(name ?? "")].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) >>> 0, 0) % CHIPS.length];
 function chip(name) {
   const [fg, bg] = chipColor(name);
-  return div().flex_none().px(5).rounded(3).bg(bg).text_color(fg).font_family(SANS).text_size(11).child(name);
+  // never wider than a third of a card: a long name (a space's, before git is read) mustn't push the stage button out
+  return div().flex_none().max_w(140).truncate().px(5).rounded(3).bg(bg).text_color(fg).font_family(SANS).text_size(11).child(name);
 }
 
 function parseGit(stdout) {
