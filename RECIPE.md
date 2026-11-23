@@ -73,11 +73,14 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
     (past 4 px, with the grabbing cursor), a trackpad's sideways scroll, or the wheel with Shift; a thin bar at the
     bottom shows where you are, and moving the selection pans to its column. Each column scrolls on its own. The column
     the sidebar marked has a border and a tint in its color.
-  - **A card**: a 3 px left bar in the worktree's status color; the project chip (one of 8 colors, from its name), the
-    branch, a machine tag (its name, such as `devbox`, or `devbox · offline` dimmed) when it's on another machine, the
+  - **A card**: a 3 px left bar in the worktree's status color; on another machine, a dashed outline (`#5c5b63`; the
+    accent when selected, still dashed), like a box around it; the project chip (one of 8 colors, from its name), the
+    branch, a machine tag (the machine icon and its name, such as `devbox`, or `devbox · offline` dimmed) when it's on
+    another machine, the
     stage button (`● In progress ▾`, tinted in the stage color); the title (14 px semibold); when it has them, a row of
     20 px link pills under the title: `↗ ENG-12` (`#8b93f8`, opens the issue), its other pull requests (one:
-    `↗ api#12`; several: `3 PRs ▾`, a scrollable list of `repo#n`, draft, checks and title, each opening on GitHub)
+    `↗ api#12`; several: `3 PRs ▾`, a scrollable list of `repo#n`, draft, checks and title, each opening on GitHub; a
+    popup takes its content's height, so the list has a max height, not `flex_1`, which would leave it empty)
     and, in Planning, `📄 Plan ready` (`#53cf91`, opens the plan); marked unread, a green bar and `● unread` by the
     title. A right-click opens its menu at the pointer: `● Mark as unread  U` (or `○ Mark as read`), `⇅ Pull requests
     (3)  P` when it has several, the stages, `× Delete worktree…  ⌫` (for a worktree under any machine's
@@ -179,8 +182,14 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
 - **A worktree's pull requests** (pure rules in `worktree-prs.js`): its own branch's; the branch's of every folder its
   agents work in (git and gh run there too); and, for each clone under its `repos/` (a folder with its own `.git`),
   `gh pr list --author @me --state open` in that repo, kept when the PR's branch exists in that clone (a clone is the
-  worktree's own; a linked worktree's branches are shared, so only its checked-out one counts). Open ones only, each
-  once, its own first. Merge and Ship stay with its own branch's.
+  worktree's own; a linked worktree's branches are shared, so only its checked-out one counts). A folder whose branch
+  has no pull request of its name (a review that checked a PR out as `rev/123`, or with no branch at all) gets the
+  open ones of its repo, anyone's (`gh pr list --state open --limit 300 --json number,url,title,isDraft,headRefName,
+  headRefOid`, once per repo per minute, without checks: those take seconds on a busy repo), whose head commit is
+  among its commits over the default branch (git's read lists up to 200 as `commits=`); their checks are asked one by
+  one (`gh pr view <url> --json statusCheckRollup`). Open ones only, each once, its own first. Merge and Ship stay with
+  its own branch's. git runs in 8 folders at a time and gh 4 calls at a time: on another machine each one is a round
+  trip, and one after another the first read of a big fleet took minutes.
 - **Unread** (`boardh.unread`, space → when): your mark, set from the menu or `U`, cleared when any of its agents is
   shown (beside the board, in its place, or to answer).
 - **Plans.** git's read of each worktree also looks for the newest `tmp/*/plan/report.md` or `report.html` (the HTML
@@ -202,7 +211,10 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
 - **An agent beside the board**: a click on a card (or an agent line on it) shows that agent in `focus-term`
   (`agent.focus`, the board keeps the keyboard), and another click shows another; a double-click goes to it. Space
   does the same for the selection and follows it; F (Focus) opens it on the oldest question with the keyboard in the
-  terminal, to type the answer. Esc on the board closes it. The board is never dimmed.
+  terminal, to type the answer. Esc on the board closes it. The board is never dimmed. A card without agents (only
+  terminals) shows its space's terminals there instead, as the space arranges them: `space.select`, and the
+  `focus-body` stack switches from `focus-agent` to `focus-tab` (`agent.focus` takes only agents); the bar over it
+  names the space's shown tab.
 - **Minimize**: in the side, it hides `focus-term`, clears `boardh.peek` and `boardh.focus`, and sets `boardh.refocus`
   so the board takes the keyboard; in the main stack, it selects `board` and the board takes the keyboard, the card
   still selected. Going to an agent's whole screen (a sidebar row, a top-bar tab, Open) hides `focus-term` first:
@@ -335,7 +347,8 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
       `prs`).
     - `asks`: hidden, 380 px, min 300, max 720, part `asks`.
     - `focus-term`: a column, hidden, weight 0.5, min 360, max 1000: `focus-head`, 30 px, part `agent-head` with
-      `where: side`, over `focus-agent`, `{agent: focused}`.
+      `where: side`, over `focus-body`, a stack (active `focus-agent`) of `focus-agent`, `{agent: focused}`, and
+      `focus-tab`, `{tab: active}` with the pane frame above.
     - `side`: hidden, 640 px, `{tab: active}`.
   - `bottom`: block, 24 px, part `bottom`.
 - `mods/board-herdr/` (`mod.json`: `{place: none}`):

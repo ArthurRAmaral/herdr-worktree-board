@@ -9,10 +9,11 @@ its tabs away. A card shows:
 
 - every agent working in that worktree, and the sub-agents they started, counted by status;
 - its branch, commits, uncommitted lines, pull request and checks; when its agents opened more pull requests (in
-  clones under the worktree's `repos/`, or from another folder), `3 PRs ▾` lists them all;
+  clones under the worktree's `repos/`, from another folder, or a review that checked someone's PR out under a
+  name of its own), `3 PRs ▾` lists them all;
 - the question an agent is waiting on, with every option in full to click (its column widens to fit them);
-- the machine it is on, when that isn't this one: a tag with the machine's name, such as `devbox`, and
-  `devbox · offline` while Herdr can't reach it;
+- the machine it is on, when that isn't this one: a dashed outline around the card, like a box, and a tag with the
+  machine's name, such as `devbox`, and `devbox · offline` while Herdr can't reach it;
 - the Linear issue it was started from (`↗ ENG-12`, which opens it), and in Planning, `📄 Plan ready` once a
   planning skill wrote its plan (below).
 
@@ -25,7 +26,8 @@ goes to its main agent, not a sub-agent that agent started.
 - **Drag**: a card to another column changes its stage; within a column, it changes its place. Drag the board's
   background to scroll it sideways, as in Linear.
 - **An agent beside the board**: a click on a card shows its agent's terminal at the right, and the board stays
-  whole and clickable, so another click shows another agent. The bar over an agent, beside the board or in its place,
+  whole and clickable, so another click shows another agent; a card with only terminals shows those. The bar over an
+  agent, beside the board or in its place,
   has **Minimize**, which gives the board back the screen and the keyboard.
 - **Machines**: with Herdr's ssh machines, the board and the sidebar filter by machine, and New agent asks where the
   agent runs.

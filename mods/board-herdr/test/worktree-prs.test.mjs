@@ -1,7 +1,7 @@
 // A worktree's pull requests (worktree-prs.js), run with `node --test test/` from the mod's folder.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseClonePrs, mergePrs, repoOf, timedOut, ghStall, stallProblem, STALL_AFTER } from "../worktree-prs.js";
+import { parseClonePrs, mergePrs, repoOf, timedOut, ghStall, stallProblem, STALL_AFTER, parseRepoPrs, prsByCommits, eachLimit } from "../worktree-prs.js";
 
 const pr = (n, repo = "acme/api", over = {}) => ({ number: n, url: `https://github.com/${repo}/pull/${n}`, title: `PR ${n}`, ...over });
 
@@ -26,6 +26,40 @@ test("parseClonePrs: no gh answer (not on GitHub, gh missing) is no PRs", () => 
   assert.deepEqual(parseClonePrs("main\n---\n"), []);
   assert.deepEqual(parseClonePrs("main\n---\nnot json"), []);
   assert.deepEqual(parseClonePrs(""), []);
+});
+
+test("parseRepoPrs: every open PR of a repo with the commit its branch is at", () => {
+  const json = JSON.stringify([
+    { number: 7, url: "https://github.com/acme/api/pull/7", title: "Someone's", isDraft: true, headRefName: "feat/x", headRefOid: "abc123" },
+  ]);
+  assert.deepEqual(parseRepoPrs(json), [{ number: 7, url: "https://github.com/acme/api/pull/7", title: "Someone's", state: "OPEN",
+    draft: true, checks: null, repo: "acme/api", branch: "feat/x", oid: "abc123" }]);
+  assert.deepEqual(parseRepoPrs("not json"), []);
+  assert.deepEqual(parseRepoPrs(""), []);
+});
+
+test("prsByCommits: a folder on another branch name (a review's rev/123) still has the PR whose head it holds", () => {
+  const list = parseRepoPrs(JSON.stringify([
+    { number: 1, url: "https://github.com/acme/api/pull/1", title: "a", headRefName: "feat/a", headRefOid: "aaa" },
+    { number: 2, url: "https://github.com/acme/api/pull/2", title: "b", headRefName: "feat/b", headRefOid: "bbb" },
+  ]));
+  // the review added a commit on top (ccc), the PR's head (aaa) is under it
+  assert.deepEqual(prsByCommits(list, ["ccc", "aaa", "zzz"]).map((p) => p.number), [1]);
+  assert.deepEqual(prsByCommits(list, []), []);
+  assert.deepEqual(prsByCommits(null, ["aaa"]), []);
+});
+
+test("eachLimit: runs every item, at most n at a time", async () => {
+  let running = 0, most = 0;
+  const seen = [];
+  await eachLimit([1, 2, 3, 4, 5, 6, 7], 3, async (x) => {
+    running++; most = Math.max(most, running);
+    await new Promise((r) => setTimeout(r, 5));
+    seen.push(x);
+    running--;
+  });
+  assert.deepEqual(seen.sort(), [1, 2, 3, 4, 5, 6, 7]);
+  assert.equal(most, 3);
 });
 
 test("mergePrs: the worktree's own first, then the rest, each once", () => {

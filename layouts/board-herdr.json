@@ -223,11 +223,39 @@
               }
             },
             {
-              "id": "focus-agent",
-              "type": "block",
-              "content": {
-                "agent": "focused"
-              }
+              "id": "focus-body",
+              "type": "stack",
+              "active": "focus-agent",
+              "children": [
+                {
+                  "id": "focus-agent",
+                  "type": "block",
+                  "content": {
+                    "agent": "focused"
+                  }
+                },
+                {
+                  "id": "focus-tab",
+                  "type": "block",
+                  "content": {
+                    "tab": "active",
+                    "pane": {
+                      "gap": 6,
+                      "radius": 6,
+                      "background": "#121214",
+                      "border": {
+                        "width": 1,
+                        "color": "#1e1e20"
+                      },
+                      "focus": {
+                        "width": 1,
+                        "color": "#625187"
+                      },
+                      "lone": false
+                    }
+                  }
+                }
+              ]
             }
           ]
         },

@@ -59,7 +59,7 @@ import { PrsFeed, PRS, PR_ASK, PR_DRAFTS } from "./prs-data.js";
 import { PrsBoard, PrsSettings, PRS_SHOWN } from "./prs.js";
 import { lanes } from "./prs-rules.js";
 import { planPage } from "./md-html.js";
-import { checks, parseClonePrs, mergePrs, timedOut, ghStall, stallProblem } from "./worktree-prs.js";
+import { checks, parseClonePrs, mergePrs, timedOut, ghStall, stallProblem, parseRepoPrs, prsByCommits, eachLimit } from "./worktree-prs.js";
 import { mainAgent, addNew, moveKey, toFront, byOrder, seq } from "./nav-order.js";
 import { readBoardConfig, firstMessage, moveInLinear, todoColumn, canDrop, issueFromBranch, startedState } from "./linear-rules.js";
 
@@ -69,6 +69,7 @@ const C = {
   line: "#1e1e20", line2: "#2a2a30", text: "#e4e4e7", soft: "#c8c8cc", muted: "#8a898e", dim: "#56555b",
   accent: "#b4a0db", accentDim: "#625187",
   you: "#ffb406", youBg: "#1f1a10", youCard: "#1b1912", youAsk: "#241f12", youLine: "#4a3a12",
+  remote: "#5c5b63", // the dashed outline of a card on another machine
   work: "#8f7fd1", land: "#53cf91", landBg: "#12201a", landLine: "#1d3a2c", done: "#6fb3f2", red: "#e0707f",
 };
 // the stages a worktree goes through, in order: the board's columns and the sidebar's groups
@@ -156,7 +157,12 @@ base=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null); e
 echo "dirty=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
 if [ -n "$base" ]; then
   mb=$(git merge-base "$base" HEAD 2>/dev/null)
-  if [ -n "$mb" ]; then echo "ahead=$(git rev-list --count "$mb"..HEAD)"; echo "diff=$(git diff --shortstat "$mb" 2>/dev/null)"; fi
+  if [ -n "$mb" ]; then
+    echo "ahead=$(git rev-list --count "$mb"..HEAD)"; echo "diff=$(git diff --shortstat "$mb" 2>/dev/null)"
+    # its commits over the default branch: a pull request whose head is one of them is this folder's, whatever the
+    # branch is called here (a review's rev/123)
+    echo "commits=$(git rev-list --max-count=200 "$mb"..HEAD | tr '\\n' ' ')"
+  fi
 fi
 echo "unpushed=$(git rev-list --count @{u}..HEAD 2>/dev/null)"
 # the newest plan a planning skill left in the worktree (tmp/<issue>/plan/report.*), its HTML when it wrote one
@@ -328,6 +334,7 @@ function parseGit(stdout) {
     unpushed: int(v.unpushed),
     lines: v.diff ? { added: ins ? Number(ins[1]) : 0, removed: del ? Number(del[1]) : 0 } : null,
     plan: v.plan || null,
+    commits: (v.commits ?? "").split(" ").filter(Boolean),
     clones: String(stdout ?? "").split("\n").filter((l) => l.startsWith("clone=")).map((l) => l.slice(6).trim()).filter(Boolean),
   };
 }
@@ -666,8 +673,8 @@ function machineSwitch(id, wide) {
 // ("offline" while Herdr can't reach it)
 const machineTag = (m) => {
   const down = (shared(COUNTS)?.offline ?? []).includes(m);
-  return h_flex().flex_none().h(16).px(5).gap(3).items_center().rounded(4).border(1).border_color(C.line2)
-    .bg(C.raised).child(mono(10, down ? C.dim : C.muted, down ? `${m} · offline` : m));
+  return h_flex().flex_none().h(16).px(5).gap(4).items_center().rounded(4).border(1).border_color(C.line2)
+    .bg(C.raised).child(icon("machine", 10, down ? C.dim : C.muted)).child(mono(10, down ? C.dim : C.muted, down ? `${m} · offline` : m));
 };
 
 // what an agent itself is doing, as an icon: working, waiting for you, done (finished while you weren't looking), idle
@@ -754,6 +761,10 @@ export default class Board extends View {
     this.prAt = {}; // "common|branch" -> when it was last asked
     this.clonePrs = {}; // a clone under a worktree's repos/ -> its open pull requests from its branches
     this.cloneAt = {}; // and when they were last asked
+    this.repoPrs = {}; // a repo (git common dir) -> its open pull requests, anyone's, with the commit each is at
+    this.repoAt = {}; // and when they were last asked
+    this.prChecks = {}; // a pull request found by its commits (url) -> its checks
+    this.checksAt = {}; // and when they were last asked
     this.offGithub = new Set(); // repos (git common dir) whose remotes aren't on GitHub
     this.stalls = {}; // machine -> gh calls in a row that GitHub didn't answer in time
     this.merged = []; // closedAt (ms) of my pull requests merged in the last 7 days
@@ -819,11 +830,19 @@ export default class Board extends View {
       // every pull request of the worktree: its own, its clones', its agents' folders'
       const prOf = (d) => { const x = this.git[d]; return x?.branch ? this.prs[`${x.common}|${x.branch}`] ?? null : null; };
       const folders = [...new Set(w.agents.map((x) => paneList.find((p) => p.pane === x.a.pane)?.cwd).filter((d) => d && d !== cwd))];
-      const prList = mergePrs(pr, [folders.map(prOf), ...(g?.clones ?? []).map((c) => this.clonePrs[c] ?? [])])
+      const prList = mergePrs(pr, [folders.map(prOf), this.byCommits(g), ...folders.map((d) => this.byCommits(this.git[d])),
+        ...(g?.clones ?? []).map((c) => this.clonePrs[c] ?? [])])
         .filter((p) => p.state === "OPEN");
       return { ...w, cwd, git: g, pr, prList, machine: w.space.machine ?? null, project: g?.project ?? w.space.name,
         branch: g?.branch ?? w.space.branch ?? null };
     });
+  }
+
+  // a folder whose branch has no pull request of that name (a review's rev/123, or no branch at all): the open ones of
+  // its repo whose head is among its commits
+  byCommits(g) {
+    if (!g?.commits?.length || (g.branch && this.prs[`${g.common}|${g.branch}`] !== null)) return [];
+    return prsByCommits(this.repoPrs[g.common], g.commits).map((p) => ({ ...p, checks: this.prChecks[p.url] ?? null }));
   }
 
   tick(cx) {
@@ -856,13 +875,14 @@ export default class Board extends View {
         const down = new Set(machines().filter((m) => m.name && m.layout === "unavailable").map((m) => m.name));
         const cut = (on, e) => on && /unreachable|cannot reach/i.test(String(e?.message ?? e)) && down.add(on);
         const heard = (on, slow) => { this.stalls = ghStall(this.stalls, on, slow); };
-        for (const [dir, on] of where) {
-          if (on && down.has(on)) continue;
+        // a few at a time: on another machine each one is a round trip
+        await eachLimit([...where], 8, async ([dir, on]) => {
+          if (on && down.has(on)) return;
           try {
             const r = await exec("sh", ["-c", GIT, "sh", dir], { on });
             this.git[dir] = r.code === 0 ? parseGit(r.stdout) : null;
           } catch (e) { if (!cut(on, e)) problem = `git${on ? ` on ${on}` : ""}: ${String(e.message ?? e)}`; }
-        }
+        });
         this.share();
         cx.notify();
         // the worktrees each repo here has under ~/.herdr/worktrees that no space shows: what a closed space left
@@ -880,25 +900,25 @@ export default class Board extends View {
         // each worktree's clones under repos/: your open pull requests from their branches, as often as a branch's
         const clones = new Map();
         for (const [dir, on] of where) for (const c of this.git[dir]?.clones ?? []) clones.set(c, on);
-        for (const [c, on] of clones) {
-          if (on && down.has(on)) continue;
-          if (!force && this.clonePrs[c] && Date.now() - (this.cloneAt[c] ?? 0) < GH_MS) continue;
+        await eachLimit([...clones], 4, async ([c, on]) => {
+          if (on && down.has(on)) return;
+          if (!force && this.clonePrs[c] && Date.now() - (this.cloneAt[c] ?? 0) < GH_MS) return;
           this.cloneAt[c] = Date.now();
           try {
             const r = await exec("sh", ["-c", CLONE_PRS, "sh", c], { on, timeout: 30000 });
             heard(on, false);
             if (r.code === 0) this.clonePrs[c] = parseClonePrs(r.stdout);
           } catch (e) { if (!cut(on, e) && timedOut(e)) heard(on, true); }
-        }
+        });
         // one pull request lookup per branch that isn't the default one
         const branches = new Map();
         for (const [dir, on] of where) {
           const g = this.git[dir];
           if (g?.branch && g.branch !== g.base) branches.set(`${g.common}|${g.branch}`, { g, on });
         }
-        for (const [key, { g, on }] of branches) {
-          if (on && down.has(on)) continue;
-          if (!force && this.prs[key] !== undefined && Date.now() - (this.prAt[key] ?? 0) < GH_MS) continue;
+        await eachLimit([...branches], 4, async ([key, { g, on }]) => {
+          if (on && down.has(on)) return;
+          if (!force && this.prs[key] !== undefined && Date.now() - (this.prAt[key] ?? 0) < GH_MS) return;
           this.prAt[key] = Date.now();
           try {
             const r = await exec("gh", ["pr", "view", g.branch, "--json", "number,url,title,state,isDraft,mergeStateStatus,statusCheckRollup"], { cwd: g.root, on });
@@ -916,7 +936,42 @@ export default class Board extends View {
             if (timedOut(e)) heard(on, true);
             else if (!cut(on, e)) problem = `gh${on ? ` on ${on}` : ""}: ${String(e.message ?? e)}`;
           }
+        });
+        // the folders whose branch has no pull request of its name: their repo's open pull requests (anyone's: a
+        // review's are someone else's), to match by commit; one list per repo, as often as a branch's
+        const repos = new Map();
+        for (const [dir, on] of where) {
+          const g = this.git[dir];
+          if (g?.commits?.length && !(g.branch && this.prs[`${g.common}|${g.branch}`] !== null) && !this.offGithub.has(g.common)) {
+            repos.set(g.common, { root: g.root, on });
+          }
         }
+        await eachLimit([...repos], 4, async ([common, { root, on }]) => {
+          if (on && down.has(on)) return;
+          if (!force && this.repoPrs[common] && Date.now() - (this.repoAt[common] ?? 0) < GH_MS) return;
+          this.repoAt[common] = Date.now();
+          try {
+            // without checks: those of a busy repo's every open pull request take GitHub seconds; asked below for the
+            // ones found
+            const r = await exec("gh", ["pr", "list", "--state", "open", "--limit", "300", "--json",
+              "number,url,title,isDraft,headRefName,headRefOid"], { cwd: root, on, timeout: 30000 });
+            heard(on, false);
+            if (r.code === 0) this.repoPrs[common] = parseRepoPrs(r.stdout);
+          } catch (e) { if (!cut(on, e) && timedOut(e)) heard(on, true); }
+        });
+        // the checks of the pull requests found by commit
+        const found = new Map();
+        for (const [dir, on] of where) for (const p of this.byCommits(this.git[dir])) found.set(p.url, on);
+        await eachLimit([...found], 4, async ([url, on]) => {
+          if (on && down.has(on)) return;
+          if (!force && this.checksAt[url] && Date.now() - this.checksAt[url] < GH_MS) return;
+          this.checksAt[url] = Date.now();
+          try {
+            const r = await exec("gh", ["pr", "view", url, "--json", "statusCheckRollup"], { on, timeout: 30000 });
+            heard(on, false);
+            if (r.code === 0) this.prChecks[url] = checks(JSON.parse(r.stdout).statusCheckRollup);
+          } catch (e) { if (!cut(on, e) && timedOut(e)) heard(on, true); }
+        });
         this.problem = problem ?? stallProblem(this.stalls);
         this.offline = [...down].sort();
       } finally {
@@ -1179,6 +1234,7 @@ export default class Board extends View {
     const t = this.cards.find((x) => x.key === key);
     const x = this.focus ? t?.needs[0] ?? t?.main : t?.main;
     if (x && (open || this.focus || this.peek)) this.peekAt(cx, x.a.address);
+    else if (t && !t.issue && !t.agents.length && (open || this.focus || this.peek)) this.peekSpace(cx, t);
     cx.notify();
   }
 
@@ -1193,6 +1249,22 @@ export default class Board extends View {
     cx.notify();
   }
 
+  // a worktree without agents: its terminals beside the board, as its space arranges them (the side's agent block
+  // shows only agents), the keyboard staying on the board
+  peekSpace(cx, t) {
+    if (!this.focus && !this.peek) {
+      this.peek = true;
+      setShared(PEEK, true);
+      run("layout.show", { id: "focus-term" });
+    }
+    setUnread(t.key, false);
+    setShared(SHOWN, null);
+    run("space.select", { id: t.key });
+    run("layout.select", { stack: "focus-body", child: "focus-tab" });
+    this.grab(cx);
+    cx.notify();
+  }
+
   // the board takes the keyboard, just after this draw or command (focus can't move while drawing, nor from a task)
   grab(cx) {
     cx.timer.after(30, () => this.h.focus());
@@ -1201,6 +1273,7 @@ export default class Board extends View {
   // an agent in the focus-term block, the keyboard staying on the board
   show(cx, address) {
     seen(address);
+    run("layout.select", { stack: "focus-body", child: "focus-agent" });
     run("agent.focus", { terminal: address });
     setShared(SHOWN, address);
     this.grab(cx);
@@ -1210,6 +1283,7 @@ export default class Board extends View {
   // terminal block showing the address), so typing answers it
   answerIn(address) {
     seen(address);
+    run("layout.select", { stack: "focus-body", child: "focus-agent" });
     run("agent.focus", { terminal: address });
     setShared(SHOWN, address);
     run("pane.focus", { terminal: address });
@@ -1303,6 +1377,7 @@ export default class Board extends View {
     if (on) {
       run("layout.show", { id: "focus-term" });
       if (t?.main) this.show(cx, t.main.a.address);
+      else if (t && !t.issue && !t.agents.length) this.peekSpace(cx, t);
     } else run("layout.hide", { id: "focus-term" });
     cx.notify();
   }
@@ -1649,7 +1724,9 @@ export default class Board extends View {
     // a flex row (stretching, unlike h_flex) so the status bar on the left runs the card's full height
     const near = this.dropNear?.key === t.key ? this.dropNear : null;
     return div().id(`card-${t.key}`).relative().w_full().flex_none().flex().flex_row().rounded(6).overflow_hidden()
-      .bg(asking ? C.youCard : C.card).border(1).border_color(sel ? C.accent : C.line)
+      // on another machine, a dashed outline, like a box around it (selected, still dashed, in the accent)
+      .bg(asking ? C.youCard : C.card).border(1).border_color(sel ? C.accent : t.machine ? C.remote : C.line)
+      .when(!!t.machine, (el) => el.border_dashed())
       .cursor_pointer().hover((s) => s.bg(C.hover))
       // a click shows its agent beside the board, a double-click goes to it; a drag to another column moves its stage
       // a drag over another card lands above or below it (a line shows where), in its column
@@ -2397,7 +2474,7 @@ export default class Board extends View {
         cx.notify();
       })
       .child(div().px(9).pt(6).pb(6).truncate().child(mono(10, C.dim, `PULL REQUESTS · ${trunc(String(p.title ?? ""), 30)}`)))
-      .child(v_flex().id("prlist-rows").flex_1().min_h(0).overflow_y_scrollbar().children(list.map((x, i) => {
+      .child(v_flex().id("prlist-rows").max_h(330).overflow_y_scrollbar().children(list.map((x, i) => {
         const c = check(x.checks);
         return v_flex().id(`pr-${i}`).w_full().flex_none().px(9).py(5).gap(2).rounded(6).cursor_pointer()
           .bg(i === this.at ? C.raised : "#00000000").hover((st) => st.bg(C.raised))
@@ -3103,8 +3180,11 @@ export default class Board extends View {
     const side = props()?.where === "side";
     // beside the board: the agent it last showed there, else the one the block shows by itself (Focus with no question)
     const f = focused();
-    const a = (side ? [shared(SHOWN), f?.agent] : [f?.terminal]).map((x) => agents().find((y) => y.address === x)).find(Boolean);
-    const tab = !a && !side ? activeSpace()?.tabs?.find((t) => t.active) : null;
+    // beside the board it may show a worktree's terminals instead (one without agents): its space's shown tab
+    const sideTab = side && findNode(layout(), "focus-body")?.active === "focus-tab";
+    const a = sideTab ? null
+      : (side ? [shared(SHOWN), f?.agent] : [f?.terminal]).map((x) => agents().find((y) => y.address === x)).find(Boolean);
+    const tab = !a && (!side || sideTab) ? activeSpace()?.tabs?.find((t) => t.active) : null;
     const title = a ? agentTitle(a) ?? a.program?.name ?? a.address : tab?.name ?? activeSpace()?.name ?? "";
     const where = a ? a.space_name : tab ? activeSpace()?.name : null;
     const sp = a ? spaces().find((x) => x.id === a.space) : activeSpace();

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const src = readFileSync(new URL("../main.js", import.meta.url), "utf8");
-const GIT = /const GIT = `([\s\S]*?)`;/.exec(src)[1].replace(/\\\$/g, "$"); // as the template literal gives it
+const GIT = /const GIT = `([\s\S]*?)`;/.exec(src)[1].replace(/\\([$\\])/g, "$1"); // as the template literal gives it
 const run = (dir) => spawnSync("sh", ["-c", GIT, "sh", dir], { encoding: "utf8" });
 const git = (cwd, ...args) => spawnSync("git", args, { cwd, encoding: "utf8" });
 
@@ -46,5 +46,20 @@ test("GIT: a clone under repos/ is listed", () => {
     const r = run(dir);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /^clone=.*\/repos\/api$/m);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("GIT: the commits the branch has over the default one, for a PR whose branch has another name here", () => {
+  const dir = repo();
+  try {
+    const root = git(dir, "rev-parse", "HEAD").stdout.trim();
+    git(dir, "update-ref", "refs/remotes/origin/main", root);
+    git(dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
+    git(dir, "checkout", "-q", "-b", "rev/12");
+    for (const m of ["y", "z"]) git(dir, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", m);
+    const [head, prev] = git(dir, "rev-list", "-2", "HEAD").stdout.trim().split("\n");
+    const r = run(dir);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, new RegExp(`^commits=${head} ${prev} *$`, "m"));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

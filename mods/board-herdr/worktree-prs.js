@@ -26,6 +26,33 @@ export function parseClonePrs(stdout) {
   }));
 }
 
+// a repo's open pull requests (anyone's, `gh pr list --json number,url,title,isDraft,headRefName,headRefOid`), with
+// the commit each one's branch is at: a review checks a PR out under a name of its own (rev/123) or with no branch
+export function parseRepoPrs(stdout) {
+  let list;
+  try { list = JSON.parse(stdout ?? ""); } catch { return []; }
+  if (!Array.isArray(list)) return [];
+  return list.map((p) => ({
+    number: p.number, url: p.url, title: p.title, state: "OPEN", draft: Boolean(p.isDraft), checks: null,
+    repo: repoOf(p.url), branch: p.headRefName, oid: p.headRefOid,
+  }));
+}
+
+// the ones whose head is among a folder's commits over the default branch: what that folder works on, whatever its
+// branch is called
+export function prsByCommits(list, commits) {
+  const have = new Set(commits ?? []);
+  return (list ?? []).filter((p) => p.oid && have.has(p.oid));
+}
+
+// fn on every item, n at a time: the folders on another machine are each a round trip, one after another they take
+// minutes
+export async function eachLimit(items, n, fn) {
+  const queue = [...items];
+  const worker = async () => { while (queue.length) await fn(queue.shift()); };
+  await Promise.all(Array.from({ length: Math.min(n, queue.length) }, worker));
+}
+
 // the worktree's own pull request first, then the others as found, each once (by url)
 export function mergePrs(own, lists) {
   const seen = new Set(), out = [];
