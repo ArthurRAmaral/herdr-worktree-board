@@ -271,6 +271,9 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   - Clicking an option (card or panel) or Y presses its number with `hc keys` and Enter if the dialog is still there,
     or `hc send`s the text, then watches for up to 8 s. Delivered means the dialog went away or the turn moved on;
     otherwise the answer is marked failed, with Retry, which never sends twice.
+  - An answer still sending 3 min after it was sent was cut off by a reload (the delivery lives in memory, the record
+    in `asks.state`): it becomes delivered (`Picked up late`) if the agent moved on, failed with Retry if the question
+    is still up, and stale if the agent closed. A failed answer the agent takes later becomes delivered too.
   - Answering in the terminal turns the record into `Resolved in terminal` after 3 s.
   - Each answer is appended to `~/.config/herdr-app/decisions.md`.
 - **Keys on the board**:
@@ -340,6 +343,7 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
     `stage` and `cleanup`, which it opens itself with `openOverlay({mod: "board-herdr", props: {part, …}})`.
   - `asks.js`: `Answerer` delivers an answer (used by the board's cards); `AsksPanel` is the `asks` part.
   - `asks-engine.js`: the Asks detection; `asks-state.js`: the record and `asks.json`.
+  - `asks-rules.js`: what becomes of an answer in flight (sending or failed), pure, tested by `test/asks-rules.test.mjs`.
   - `nav-order.js`: the order's rules and a worktree's main agent, pure, tested by `test/nav-order.test.mjs`.
   - `prs-rules.js`: the PRs view's rules, pure (no `herdr` import), tested by `node --test test/*.test.mjs` from the
     mod's folder: the searches, the GraphQL query, normalizing, CODEOWNERS, the columns and the count.

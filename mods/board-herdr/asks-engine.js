@@ -2,6 +2,7 @@
 // it is always shown, so asks are found before the panel is ever opened.
 import { terminals, agents, focused, hc, exec, notify, appHome } from "herdr";
 import { readState, update, hash, statusOf, reportOf, msgOf, agentName, MAX_ASKS, KEEP_MS } from "./asks-state.js";
+import { inFlight } from "./asks-rules.js";
 const MAX_CHECKED = 300;
 
 // A prompt the person sent, not the input box at the bottom (which sits under a rule
@@ -200,10 +201,11 @@ export class Engine {
         const t = byAddress.get(a.address);
         const st = statusOf(t);
         // An answer the panel gave up on (no reaction in time) was often just held by hc until
-        // the terminal went quiet: once the agent moves on, it was delivered after all.
-        if ((a.state === "failed" || a.state === "sending") && t && a.sent_turn != null) {
-          const moved = (t.turn ?? 0) > a.sent_turn || (a.delivery !== "send" && !(st === "blocked" && msgOf(t) === a.msg));
-          if (moved && a.state === "failed") { a.state = "delivered"; a.answered_at = now; a.error = null; a.note = "Picked up late"; }
+        // the terminal went quiet: once the agent moves on, it was delivered after all. One still
+        // sending long after any delivery could run was cut off by a reload: settled the same way.
+        if (a.state === "failed" || a.state === "sending") {
+          const patch = inFlight(a, t ? { turn: t.turn ?? 0, status: st, msg: msgOf(t) } : null, now);
+          if (patch) Object.assign(a, patch);
           continue;
         }
         if (a.state !== "pending") continue;
