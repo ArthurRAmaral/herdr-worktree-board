@@ -7,8 +7,9 @@ const names = (v) => (Array.isArray(v) ? v : []).filter((n) => typeof n === "str
 const mapOf = (v, ok) => Object.fromEntries(Object.entries(v && typeof v === "object" ? v : {})
   .filter(([k, val]) => typeof val === "string" && ok(k, val)));
 
-// board.json read into skills (the picker's list), a skill per stage, skills that take the issue ID, and a skill's flags;
-// the old {orchestrate: "x"} still reads as x, started in progress
+// board.json read into skills (the picker's list), a skill per stage, skills that take the issue ID, a skill's flags,
+// and the features still being built, each off unless board.json says `true` ({"features": {"prs": true}}: the PRs
+// view); the old {orchestrate: "x"} still reads as x, started in progress
 export function readBoardConfig(json) {
   const j = json && typeof json === "object" ? json : {};
   const cfg = {
@@ -16,6 +17,7 @@ export function readBoardConfig(json) {
     stageSkills: mapOf(j.stageSkills, (_, v) => NAME.test(v)),
     issueArg: names(j.issueArg),
     skillFlags: mapOf(j.skillFlags, (k) => NAME.test(k)),
+    features: { prs: j.features?.prs === true },
   };
   if (typeof j.orchestrate === "string" && NAME.test(j.orchestrate) && !cfg.skills.length) {
     cfg.skills = [j.orchestrate];

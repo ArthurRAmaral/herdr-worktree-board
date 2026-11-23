@@ -11,8 +11,9 @@ Code or OpenCode in it on your message plus a Context block (a Linear issue, a P
 skill of yours on a Linear issue. With a Linear key, the first column lists your Linear issues in Todo; dragging one
 onto Planning or In progress starts it (a worktree, an agent, that column's skill) after a short confirmation, and
 moves it to In Progress in Linear when it lands there. Done removes the worktree after 3 days; ⌘W on a worktree's last
-tab removes it at once. A PRs view (⌘⇧G) lays out the open pull requests that wait on you, other people's and yours,
-as a kanban of where each one stands. The whole board works from the keyboard.
+tab removes it at once. A PRs view (⌘⇧G), still being built and off unless `board.json` turns it on, lays out the open
+pull requests that wait on you, other people's and yours, as a kanban of where each one stands. The whole board works
+from the keyboard.
 
 ![Board (Herdr)](preview.png)
 
@@ -137,8 +138,8 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
     at risk (`2 uncommitted changes: lost on remove` / `no uncommitted changes` / `folder already gone`, `3 commits on
     no remote (kept on the branch)`), `Open`, `Remove` (`Remove…` then a red `Remove anyway` when it has changes); a footer
     `Remove the N without changes` and `Done`.
-- **PRs** (the `main` stack's third child, ⌘⇧G or the sidebar's `PRs` row under Asks, with the pull request icon, `⌘⇧G`
-  and an amber count pill like Asks'): a header (`PRs` 15 px semibold, `read HH:MM` or `reading…` in mono `#56555b`,
+- **PRs** (only with `features.prs` on, see Features below; the `main` stack's third child, ⌘⇧G or the sidebar's `PRs`
+  row under Asks, with the pull request icon, `⌘⇧G` and an amber count pill like Asks'): a header (`PRs` 15 px semibold, `read HH:MM` or `reading…` in mono `#56555b`,
   any gh problem in red, then `hjkl move · ⏎ open · a agent · d draft`, `↻ Refresh  R` and `⚙ Repos  ,`), then two
   lanes sharing the height, each a title (`PRs de outros · N`, `Meus PRs · N`) over five columns:
   - PRs de outros: `Draft` `#56555b` · `Precisa da minha revisão` `#ffb406` · `Precisa do meu time` `#8f7fd1` ·
@@ -287,6 +288,10 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
 - Clicking a space in the sidebar's Spaces shows its terminal (in All scope); a click on an agent or worktree row goes
   to its agent (hide `focus-term`, agent.focus, pane.focus, the `work` child). The sidebar's agent order is what ⌘] / ⌘[ follow.
   Right-click any worktree or agent row: the stage picker at the pointer.
+- **Features still being built** (`board.json`'s `features`, each off unless it is `true`): `prs`, the PRs view. The
+  sidebar's copy reads `board.json` at start and every 30 s into `boardh.features`. Off: no PRs row in the sidebar,
+  ⌘⇧G (`board-herdr.prs`) and the gear do nothing, GitHub isn't read for it, and turning it off while the view shows
+  goes back to the board. Every PRs rule below holds only with it on.
 - **PRs: which come in.** Only open PRs of the org in `~/.config/herdr-app/prs.json` (`{"org": "acme", "team_repos":
   [{"repo": "web"}, {"repo": "monorepo", "codeowners": "payments"}]}`): yours (always), ones asking your review,
   ones you reviewed (only where your review was once asked, or in a team repo), and every PR of a team repo, nobody
@@ -355,7 +360,7 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   - New agent: `boardh.agent`, `boardh.newStage`, `boardh.pending`.
   - Worktrees: `boardh.spaceStages`, `boardh.stageAt`, `boardh.spaceTitles`.
   - Asks: `asks.state`.
-  - PRs: `boardh.prs` (`{at, me, org, prs, problem, reading}`), `boardh.prAsk`, `boardh.prDrafts`, `boardh.prsShown`,
+  - PRs: `boardh.features` (`{prs}`, from `board.json`), `boardh.prs` (`{at, me, org, prs, problem, reading}`), `boardh.prAsk`, `boardh.prDrafts`, `boardh.prsShown`,
     `boardh.branches` (each worktree's branch, written by the board copy, for `⌁`).
 - `herdr` functions:
   - Data: `spaces`, `agents`, `terminals`, `panes`, `focused`, `layout`, `shared`/`setShared`, `props`, `window`,
@@ -387,7 +392,7 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
 - `~/.config/herdr-app/board.json` is optional: `skills` (the skills New agent offers, each found in
   `~/.claude/skills/<name>/SKILL.md` or the repo's `.claude/skills/<name>/SKILL.md` on that machine), `stageSkills`
   (`{"todo": …, "in_progress": …}`: what a Linear card dropped there runs), `issueArg` (skills whose first argument is
-  the issue ID) and `skillFlags` (flags always passed). The older `{"orchestrate": "<skill>"}` reads as that skill for
+  the issue ID), `skillFlags` (flags always passed) and `features` (`{"prs": true}` turns on the PRs view). The older `{"orchestrate": "<skill>"}` reads as that skill for
   In progress. Claude Code starts on `/<skill> [ID] [flags] <your message>` and the Context. Pure rules (this file,
   the issue in a branch, which drops start, the started state, the first message, the column's filter) in
   `linear-rules.js`; Markdown to a page in `md-html.js`.

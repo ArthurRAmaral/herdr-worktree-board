@@ -65,17 +65,9 @@ goes to its main agent, not a sub-agent that agent started.
 - **Asks** (⌘⇧A): every question your agents ask, answered from the card or the panel without opening the terminal.
   This covers permission prompts, menus of options and turns that end with a plain-text question. It is built on
   [herdr-agent-ask](https://github.com/sachin-philip/herdr-agent-ask).
-- **PRs** (⌘⇧G): the open pull requests that wait on you, as a kanban with two lanes. The labels are in Portuguese
-  (English in brackets here):
-  - `PRs de outros` [other people's]: Draft · Precisa da minha revisão [needs my review] · Precisa do meu time [needs
-    my team] · Revisado, esperando o autor [reviewed, waiting on the author] · Pronto para merge [ready to merge].
-  - `Meus PRs` [mine]: Draft: revisar para liberar [draft to review and publish] · Draft: ideias [draft ideas] ·
-    Comentários a resolver [comments to resolve] · Esperando review [waiting for review] · Pronto para merge.
-  - Each card has the author, checks, unresolved threads, age, ↗ to GitHub, and ⌁ to the agent whose worktree is on
-    the PR's branch.
-  - The gear sets your GitHub org and your team's repos (a whole repo, or only a CODEOWNERS team's folders). They are
-    saved in `~/.config/herdr-app/prs.json`, which the package doesn't ship.
-  - Read only: nothing is ever written to GitHub.
+- **Still being built, off by default**: a PRs view of the pull requests that wait on you on GitHub.
+  `"features": { "prs": true }` in `board.json` turns it on (the sidebar's PRs row and ⌘⇧G); it is unfinished and may
+  change.
 - **Worktrees don't pile up on disk.**
   - Done removes a worktree after 3 days, unless it has uncommitted changes.
   - ⌘W on a worktree's last tab removes it.
@@ -109,7 +101,6 @@ By hand: copy `layouts/board-herdr.json` to `~/.config/herdr-app/layouts/` and `
 | ⌘N | this layout | New agent |
 | ⌘W | this layout | close the tab; on a worktree's last tab, remove the worktree |
 | ⌘⇧A | this layout | the Asks panel |
-| ⌘⇧G | this layout | the PRs view (again: back to the board) |
 
 ## What it runs
 
@@ -122,9 +113,9 @@ Mods are trusted code. This one:
 - runs `gh` for each branch's pull request and checks (also for the folders a worktree's agents work in, and `gh pr
   list` of your open PRs in each clone under its `repos/`), your PRs merged this week, and Merge PR / Ship PR
   (`gh pr merge`, `git push -u origin HEAD && gh pr create --fill`), only when you click or press M and confirm;
-- runs `gh api graphql` for the PRs view, every 3 minutes while the layout is shown. It searches the open PRs of the
-  org in `prs.json` (yours, asking your review, reviewed by you, and your team repos'), and reads those repos'
-  CODEOWNERS file. Nothing is sent anywhere but GitHub, as your `gh` login;
+- with `features.prs` on (above), runs `gh api graphql` for the PRs view, every 3 minutes while the layout is shown.
+  It searches the open PRs of the org in `prs.json` (yours, asking your review, reviewed by you, and your team
+  repos'), and reads those repos' CODEOWNERS file. Nothing is sent anywhere but GitHub, as your `gh` login;
 - runs `hc` to read agents' screens and type your answers into them;
 - runs `claude -p` (Haiku) on each finished agent turn with a `?` in it, and on a dialog it can't read. **That sends the
   agent's last message to Anthropic through your own Claude Code login**, a few seconds and under a cent per call. Set

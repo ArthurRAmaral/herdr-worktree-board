@@ -130,6 +130,7 @@ const SCOPE = "boardh.scope"; // shared: "all", or anything else for the shown s
 const MACHINE = "boardh.machine"; // shared: the machine filter: null for every one, "" this computer, else a machine's name
 const UNREAD = "boardh.unread"; // shared: space id -> when you marked that worktree unread, to see later (green until opened)
 const SHOWN = "boardh.shown"; // shared: the agent the board last showed beside it, for the bar over it
+const FEATURES = "boardh.features"; // shared: board.json's features still being built ({prs}), read by the sidebar's copy
 const PEEK = "boardh.peek"; // shared: Space shows the selected agent beside the board (the top bar then keeps the board)
 const COL = "boardh.col"; // shared: {kind, at}, the stage the sidebar last opened the board on (kind null: none)
 const REFOCUS = "boardh.refocus"; // shared: when a dialog over the board closed (ms): the board takes the keyboard back
@@ -267,6 +268,8 @@ echo "home=$HOME"`;
 
 const findNode = (node, id) => node?.id === id ? node : (node?.children ?? []).reduce((f, c) => f ?? findNode(c, id), null);
 const shownView = () => findNode(layout(), "main")?.active ?? shared(VIEW) ?? "board";
+// the PRs view is still being built: shown only with {"features": {"prs": true}} in board.json
+const prsFeature = () => shared(FEATURES)?.prs === true;
 const lastLine = (s) => ((s ?? "").split("\n").map((l) => l.trim()).filter(Boolean).pop() ?? "").slice(0, 200);
 const mono = (size, color, text) => div().font_family(MONO).text_size(size).text_color(color).child(text);
 const icon = (name, size, color) => svg(`mods/${MOD}/${name}.svg`).size(size).flex_none().text_color(color);
@@ -488,12 +491,13 @@ function openBoard(kind) {
 
 // shows the PRs view (the main stack's "prs" child), reads GitHub again and gives it the keyboard
 function openPrs() {
+  if (!prsFeature()) return;
   run("layout.select", { stack: "main", child: "prs" });
   setShared(VIEW, "prs");
   setShared(PR_ASK, Date.now());
   setShared(PRS_SHOWN, Date.now());
 }
-const openPrsSettings = () => openOverlay({ mod: MOD, kind: "dialog", width: 620, height: 520, props: { part: "prs-settings" } });
+const openPrsSettings = () => prsFeature() && openOverlay({ mod: MOD, kind: "dialog", width: 620, height: 520, props: { part: "prs-settings" } });
 // the worktree here on a PR's branch: its repo and branch first, else the only worktree on that branch
 function worktreeOn(repo, branch) {
   const list = (shared(BRANCHES) ?? []).filter((b) => b.branch === branch);
@@ -711,9 +715,18 @@ export default class Board extends View {
         config(cx);
         cx.timer.every(30000, config);
         cx.timer.every(1000, (cx) => this.engine.tick(cx));
+        // board.json's features: off, the PRs view and its row go, and GitHub isn't read for it
+        const features = (cx) => cx.spawn(async (cx) => {
+          const f = (await boardConfig()).features;
+          if (JSON.stringify(f) !== JSON.stringify(shared(FEATURES))) setShared(FEATURES, f);
+          if (!f.prs && shownView() === "prs") openBoard(null);
+          cx.notify();
+        });
+        features(cx);
+        cx.timer.every(30000, features);
         // the PRs view's data: read here, where it is always drawn, so the sidebar can count it
         this.prsFeed = new PrsFeed();
-        cx.timer.every(1000, (cx) => this.prsFeed.tick(cx));
+        cx.timer.every(1000, (cx) => { if (prsFeature()) this.prsFeed.tick(cx); });
       }
       if (this.part === "nav") cx.spawn(async (cx) => {
         for (;;) {
@@ -2210,7 +2223,7 @@ export default class Board extends View {
     if (narrow) {
       return v_flex().id("nav").size_full().bg(C.top).pt(10).pb(8).gap(3).items_center()
         .on_size_change((size, cx) => { this.size = size; cx.notify(); })
-        .child(newBtn).child(boardRow).child(asksRow).child(prsRow).children(needsRow ? [needsRow] : [])
+        .child(newBtn).child(boardRow).child(asksRow).children(prsFeature() ? [prsRow] : []).children(needsRow ? [needsRow] : [])
         .children(live.map(([k, , color]) => h_flex().id(`nav-${k}`).w(40).h(30).flex_none().rounded(7).gap(4).items_center().justify_center()
           .bg(view === "board" && col === k ? "#2c2838" : "#00000000").cursor_pointer().hover((st) => st.bg(C.hover))
           .on_click(() => openBoard(view === "board" && col === k ? null : k))
@@ -2252,7 +2265,7 @@ export default class Board extends View {
 
     return v_flex().id("nav").size_full().bg(C.top).px(8).pt(10).pb(8).gap(3)
       .on_size_change((size, cx) => { this.size = size; cx.notify(); })
-      .child(newBtn).child(boardRow).child(asksRow).child(prsRow)
+      .child(newBtn).child(boardRow).child(asksRow).children(prsFeature() ? [prsRow] : [])
       .child(div().pt(4).child(scopeSwitch("nav-scope", true)))
       .children(machineList().length > 1 ? [machineSwitch("nav-machine", true)] : [])
       .children(needsRow ? [div().pt(4).child(needsRow)] : [])

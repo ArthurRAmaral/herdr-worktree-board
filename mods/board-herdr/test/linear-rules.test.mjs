@@ -5,7 +5,7 @@ import * as L from "../linear-rules.js";
 
 test("readBoardConfig: legacy orchestrate key", () => {
   assert.deepEqual(L.readBoardConfig({ orchestrate: "orch" }),
-    { skills: ["orch"], stageSkills: { in_progress: "orch" }, issueArg: [], skillFlags: {} });
+    { skills: ["orch"], stageSkills: { in_progress: "orch" }, issueArg: [], skillFlags: {}, features: { prs: false } });
 });
 
 test("readBoardConfig: drops bad names and reads all keys", () => {
@@ -20,7 +20,7 @@ test("readBoardConfig: drops bad names and reads all keys", () => {
 });
 
 test("readBoardConfig: null gives empty lists and maps", () => {
-  assert.deepEqual(L.readBoardConfig(null), { skills: [], stageSkills: {}, issueArg: [], skillFlags: {} });
+  assert.deepEqual(L.readBoardConfig(null), { skills: [], stageSkills: {}, issueArg: [], skillFlags: {}, features: { prs: false } });
 });
 
 test("issueFromBranch finds a known team's ID", () => {
@@ -91,4 +91,11 @@ test("moveInLinear: only a Linear start that ends in progress", () => {
   assert.equal(L.moveInLinear(true, "in_progress"), true);
   assert.equal(L.moveInLinear(true, "todo"), false);
   assert.equal(L.moveInLinear(false, "in_progress"), false);
+});
+
+test("readBoardConfig: features are off unless board.json turns them on with true", () => {
+  assert.deepEqual(L.readBoardConfig(null).features, { prs: false });
+  assert.deepEqual(L.readBoardConfig({ features: { prs: true } }).features, { prs: true });
+  assert.deepEqual(L.readBoardConfig({ features: { prs: "yes" } }).features, { prs: false });
+  assert.deepEqual(L.readBoardConfig({ features: true }).features, { prs: false });
 });
