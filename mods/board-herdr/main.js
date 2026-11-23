@@ -51,7 +51,7 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle, Popup } from "gpui-base";
 import { spaces, agents, panes, run, props, exec, shared, setShared, window, nextCommand, layout, openOverlay, closeOverlay,
-  knownAgents, home, focused, setAgentOrder, terminals, notify, machines, readTextFile, writeTextFile, appHome } from "herdr";
+  knownAgents, home, focused, setAgentOrder, terminals, notify, machines, readTextFile, writeTextFile, appHome, hc } from "herdr";
 import { Engine } from "./asks-engine.js";
 import { loadConfig } from "./asks-state.js";
 import { AsksPanel, Answerer, pickable, waitingAsks, questionsOf } from "./asks.js";
@@ -61,6 +61,8 @@ import { lanes } from "./prs-rules.js";
 import { planPage } from "./md-html.js";
 import { checks, parseClonePrs, mergePrs, timedOut, ghStall, stallProblem, parseRepoPrs, prsByCommits, eachLimit } from "./worktree-prs.js";
 import { mainAgent, addNew, moveKey, toFront, byOrder, seq } from "./nav-order.js";
+import { appOf, resumeArgv, pickOpencodeSession, shellLine, parseClaudeSession, parkedCount } from "./park-rules.js";
+import { normLabel, labelsOf, toggleLabel, allLabels, suggest, groupByLabel, dropGone } from "./labels-rules.js";
 import { readBoardConfig, firstMessage, moveInLinear, todoColumn, canDrop, issueFromBranch, startedState } from "./linear-rules.js";
 
 const MOD = "board-herdr";
@@ -70,6 +72,7 @@ const C = {
   accent: "#b4a0db", accentDim: "#625187",
   you: "#ffb406", youBg: "#1f1a10", youCard: "#1b1912", youAsk: "#241f12", youLine: "#4a3a12",
   remote: "#9a99a0", // the dashed outline of a card on another machine
+  selBg: "#262139", selAsk: "#2d2615", // the selected card: tinted, the one waiting for you still amber
   work: "#8f7fd1", land: "#53cf91", landBg: "#12201a", landLine: "#1d3a2c", done: "#6fb3f2", red: "#e0707f",
 };
 // the stages a worktree goes through, in order: the board's columns and the sidebar's groups
@@ -131,6 +134,10 @@ const SCOPE = "boardh.scope"; // shared: "all", or anything else for the shown s
 const MACHINE = "boardh.machine"; // shared: the machine filter: null for every one, "" this computer, else a machine's name
 const UNREAD = "boardh.unread"; // shared: space id -> when you marked that worktree unread, to see later (green until opened)
 const SHOWN = "boardh.shown"; // shared: the agent the board last showed beside it, for the bar over it
+const PARKED = "boardh.parked"; // shared: space id -> {at, agents: [{address, app, session, cwd, argv, title}]}: agents
+// ended to free the machine, to bring back where they left off
+const LABELS = "boardh.labels"; // shared: space id -> its labels, your words for it (pesquisa, feature, bug…)
+const GROUP = "boardh.group"; // shared: true: each column's cards under their first label
 const FEATURES = "boardh.features"; // shared: board.json's features still being built ({prs}), read by the sidebar's copy
 const PEEK = "boardh.peek"; // shared: Space shows the selected agent beside the board (the top bar then keeps the board)
 const COL = "boardh.col"; // shared: {kind, at}, the stage the sidebar last opened the board on (kind null: none)
@@ -405,6 +412,7 @@ function stageReader(list) {
 // moves a worktree to a stage (at the top of it in the sidebar); Archived puts its tabs away (they keep running and come back when they need you),
 // leaving Archived brings them back
 function setStage(spaceId, stage) {
+  const was = worktrees().find((w) => w.key === spaceId)?.stage;
   if ((shared(SPACE_STAGES) ?? {})[spaceId] !== stage) {
     setShared(STAGE_AT, { ...(shared(STAGE_AT) ?? {}), [spaceId]: Date.now() });
     setShared(ORDER, toFront(shared(ORDER) ?? [], spaceId)); // it comes in at the top of the stage in the sidebar
@@ -414,6 +422,9 @@ function setStage(spaceId, stage) {
     if (stage === "archived" && !t.settled) run("tab.settle", { id: t.id });
     else if (stage !== "archived" && t.settled) run("tab.unsettle", { id: t.id });
   }
+  // archived: its agents can be ended, to free the machine; out of Archived, the ones ended come back
+  if (stage === "archived" && was !== "archived") openPark(spaceId, "end", true);
+  else if (was === "archived" && stage !== "archived") openPark(spaceId, "restore", true);
 }
 
 // every space as a worktree: its agents (the most urgent first, then the one used last), each with the sub-agents it
@@ -551,11 +562,14 @@ function editIssue(p) {
 // the stage picker: at the pointer for a click, centered for a key; for a Linear card (issue), only the stages it can
 // start in (only), and a pick opens its summary
 // menu: a right-click's, with an action on top: Mark as unread / read for a worktree, Open in Linear for an issue
-function openStagePicker(space, title, stage, pointer, { only, issue, menu, prs } = {}) {
+function openStagePicker(space, title, stage, pointer, { only, issue, menu, prs, end, restore } = {}) {
   const deletable = !issue && Boolean(spaces().find((s) => s.id === space && removable(s)));
-  // the actions on top: Mark as unread / read or Open in Linear, and a worktree's pull requests when it has several
-  const actions = menu ? [issue ? (issue.url ? "open" : null) : "unread", prs?.length > 1 ? "prs" : null].filter(Boolean) : [];
-  openOverlay({ mod: MOD, props: { part: "stage", space, title, stage, deletable, only, issue, actions, prs: actions.includes("prs") ? prs : null },
+  // the actions on top: Mark as unread / read or Open in Linear, a worktree's pull requests when it has several, its
+  // labels, and End agents (those that can come back) or Restore (those ended)
+  const actions = menu ? [issue ? (issue.url ? "open" : null) : "unread", prs?.length > 1 ? "prs" : null, issue ? null : "labels",
+    end ? "park" : null, restore ? "restore" : null].filter(Boolean) : [];
+  openOverlay({ mod: MOD, props: { part: "stage", space, title, stage, deletable, only, issue, actions, end, restore,
+    prs: actions.includes("prs") ? prs : null },
     kind: pointer ? "popup" : "dialog",
     width: 250, height: 44 + (only?.length ?? STAGES.length) * 30 + (deletable ? 40 : 0) + (actions.length ? actions.length * 30 + 10 : 0) });
 }
@@ -583,6 +597,93 @@ function deleteWorktree(spaceId) {
   const s = spaces().find((x) => x.id === spaceId);
   if (s && removable(s)) openOverlay({ mod: "worktree", kind: "dialog", width: 440, height: 260, props: { space: s.id, action: "remove" } });
 }
+
+// ---- ending a worktree's agents, and bringing them back -------------------------------------------------------------
+
+// a terminal's agent: its shell's children (the agent is one: the shell runs it, then stays), and Claude Code's record
+// of the session the agent is in (~/.claude/sessions/<pid>.json), after ---
+const AGENT_PROC = `for c in $(pgrep -P "$1"); do
+  echo "child=$c"
+  f="$HOME/.claude/sessions/$c.json"
+  if [ -f "$f" ]; then echo ---; cat "$f"; exit 0; fi
+done
+exit 0`;
+
+// a worktree's agents and the sub-agents they started, each with the program that can bring it back (null: none)
+function parkable(w) {
+  return [...(w?.agents ?? []).map((x) => ({ address: x.a.address, app: appOf(x.a.app ?? x.a.program?.name), title: x.a.title })),
+    ...(w?.subs ?? []).map((s) => ({ address: s.address, app: appOf(s.agent ?? s.report?.app), title: s.title }))];
+}
+
+// ends a worktree's agents that can come back: each one's session read first (Claude Code's record, OpenCode's
+// session list of its folder), then its process ended, only its: the terminal's shell stays, to bring it back in.
+// Keeps each one ended in PARKED; returns {ended, kept: [{address, why}]}
+async function parkAgents(spaceId, progress) {
+  const w = worktrees().find((x) => x.key === spaceId);
+  const ended = [], kept = [];
+  for (const a of parkable(w)) {
+    if (!a.app) { kept.push({ ...a, why: "can't be resumed" }); continue; }
+    progress?.(a);
+    try {
+      const g = JSON.parse((await hc(["get", a.address, "--json"])).stdout);
+      const on = a.address.includes("/") ? a.address.split("/")[0] : null;
+      const r = await exec("sh", ["-c", AGENT_PROC, "sh", String(g.pid)], { on });
+      const [procs, record = ""] = String(r.stdout ?? "").split(/^---$/m);
+      let pid = Number(/^child=(\d+)/m.exec(procs)?.[1]) || null, session = null;
+      if (a.app === "claude") {
+        const c = parseClaudeSession(record);
+        session = c?.session ?? null;
+        pid = c?.pid ?? null;
+      } else {
+        const l = await exec("opencode", ["session", "list", "--format", "json"], { cwd: g.cwd, on, timeout: 30000 });
+        session = pickOpencodeSession(JSON.parse(l.stdout || "[]"), g.cwd, g.title ?? a.title);
+      }
+      const argv = resumeArgv(a.app, g.foreground?.argv ?? [], session);
+      if (!argv || !pid) { kept.push({ ...a, why: "no session found" }); continue; }
+      const k = await exec("kill", ["-TERM", String(pid)], { on });
+      if (k.code !== 0) { kept.push({ ...a, why: lastLine(k.stderr) || "not ended" }); continue; }
+      ended.push({ address: a.address, app: a.app, session, cwd: g.cwd, argv, title: a.title });
+      const all = shared(PARKED) ?? {}, rec = all[spaceId] ?? { at: Date.now(), agents: [] };
+      setShared(PARKED, { ...all, [spaceId]: { ...rec, agents: [...rec.agents.filter((x) => x.address !== a.address), ended.at(-1)] } });
+    } catch (e) { kept.push({ ...a, why: String(e.message ?? e) }); }
+  }
+  return { ended, kept };
+}
+
+// brings a worktree's ended agents back where they left off: typed in its terminal's shell (cd, then the agent with
+// its flags and the session), or in a new tab of the space when that terminal is gone. Returns the ones that didn't
+async function restoreAgents(spaceId) {
+  const rec = (shared(PARKED) ?? {})[spaceId];
+  const left = [];
+  for (const e of rec?.agents ?? []) {
+    try {
+      if (agents().some((a) => a.address === e.address)) continue; // running again already
+      if (terminals().some((x) => x.address === e.address && (!x.state || x.state === "live"))) {
+        const r = await hc(["send", e.address, shellLine(e.cwd, e.argv)]);
+        if (r.code !== 0) throw new Error(lastLine(r.stderr) || "couldn't type in its terminal");
+      } else run("tab.new", { space: spaceId, folder: e.cwd, argv: e.argv });
+    } catch (err) { left.push({ ...e, why: String(err.message ?? err) }); }
+  }
+  const { [spaceId]: _, ...rest } = shared(PARKED) ?? {};
+  setShared(PARKED, left.length ? { ...rest, [spaceId]: { ...rec, agents: left } } : rest);
+  return left;
+}
+
+// End agents (mode "end", for a worktree with agents that can come back) or Restore (mode "restore", for one with
+// agents ended); offer: opened by a stage change, so only when there is something to do
+function openPark(spaceId, mode, offer) {
+  const w = worktrees().find((x) => x.key === spaceId);
+  if (!w) return;
+  const n = mode === "end" ? parkable(w).filter((a) => a.app).length : parkedCount((shared(PARKED) ?? {})[spaceId]);
+  if (!n && offer) return;
+  openOverlay({ mod: MOD, kind: "dialog", width: 460, height: 250, props: { part: "park", space: spaceId, name: w.name, mode } });
+}
+
+// a worktree's labels: a field to type one (an existing one, or a new one), the list to turn them on and off
+function openLabels(spaceId, name, pointer) {
+  openOverlay({ mod: MOD, kind: pointer ? "popup" : "dialog", width: 300, height: 320, props: { part: "labels", space: spaceId, name } });
+}
+const labelMap = () => shared(LABELS) ?? {};
 
 // Minimize on the bar over an agent: beside the board (Peek or Focus), the side closes; in the board's place, the board
 // comes back; either way the board takes the keyboard, so another card or agent is a click or a key away
@@ -697,6 +798,8 @@ export default class Board extends View {
     if (this.part === "cleanup") { this.initCleanup(cx); return; }
     if (this.part === "prs-settings") { this.prsSet = new PrsSettings(); this.prsSet.init(cx); return; }
     if (this.part === "prlist") { this.at = 0; this.h = cx.focus_handle(); this.h.focus(); cx.timer.after(300, () => this.h.focus()); return; }
+    if (this.part === "park") { this.run = null; this.h = cx.focus_handle(); this.h.focus(); cx.timer.after(300, () => this.h.focus()); return; }
+    if (this.part === "labels") { this.initLabels(cx); return; }
     if (this.part === "prs") {
       this.prsUi = new PrsBoard({ agentFor: worktreeOn, settings: openPrsSettings, refocused: () => shared(REFOCUS) ?? 0,
         openSpace: (id) => { const w = worktrees().find((x) => x.key === id); if (w) goToWorktree(w); } });
@@ -778,6 +881,7 @@ export default class Board extends View {
     this.asks = {}; // address -> the question on its screen
     this.asking = false;
     this.filter = null; // a project, or null for all
+    this.labelFilter = null; // a label, or null for all
     this.sel = null; // the selected worktree (space id)
     this.focus = false;
     this.peek = false; // Space: the selected worktree's agent beside the board, following the selection
@@ -1070,6 +1174,11 @@ export default class Board extends View {
     const kept = shared(SPACE_ISSUES) ?? {}, live = new Set(spaces().map((s) => s.id));
     const alive = Object.fromEntries(Object.entries(kept).filter(([id]) => live.has(id)));
     if (live.size && Object.keys(alive).length !== Object.keys(kept).length) setShared(SPACE_ISSUES, alive);
+    // and its labels, and its ended agents
+    for (const key of [LABELS, PARKED]) {
+      const m = shared(key) ?? {}, left = dropGone(m, live);
+      if (live.size && Object.keys(left).length !== Object.keys(m).length) setShared(key, left);
+    }
     const branches = cards.filter((t) => t.git?.branch).map((t) => ({ space: t.key, project: t.git.project, branch: t.git.branch }));
     if (JSON.stringify(branches) !== JSON.stringify(shared(BRANCHES) ?? [])) setShared(BRANCHES, branches);
   }
@@ -1207,15 +1316,19 @@ export default class Board extends View {
   columns() {
     const q = this.query.trim().toLowerCase();
     const has = (list) => !q || list.some((v) => String(v ?? "").toLowerCase().includes(q));
+    const lm = labelMap();
     const hit = (t) => has([t.name, t.branch, t.project, t.space.name, ...t.agents.map((x) => cleanTitle(x.a.title)),
-      ...t.needs.map((x) => this.asks[x.a.address])]);
+      ...t.needs.map((x) => this.asks[x.a.address]), ...labelsOf(lm, t.key)]);
     const cards = this.cards;
-    const shown = cards.filter((t) => inScope(t.key) && (!this.filter || t.project === this.filter) && hit(t));
+    const shown = cards.filter((t) => inScope(t.key) && (!this.filter || t.project === this.filter)
+      && (!this.labelFilter || labelsOf(lm, t.key).includes(this.labelFilter)) && hit(t));
+    // grouped by label: each column's cards in their groups' order, so the keys walk them as they show
+    const grouped = (list) => (shared(GROUP) ? groupByLabel(list, lm).flatMap(([, cs]) => cs) : list);
     // in the order you dragged them to, the same as the sidebar's
     const order = shared(ORDER) ?? [];
     return this.linearCols().map(([k]) => (k === "linear"
       ? this.linearList(cards).filter(({ issue: i }) => has([i.identifier, i.title, i.team?.name, i.project?.name]))
-      : byOrder(shown.filter((t) => t.stage === k), (t) => t.key, order)));
+      : grouped(byOrder(shown.filter((t) => t.stage === k), (t) => t.key, order))));
   }
 
   // what the keys move through: folded columns count as empty
@@ -1505,6 +1618,8 @@ export default class Board extends View {
     else if (k === "/") this.search.focus();
     else if (k === "a" && t) { this.archive(t); cx.notify(); }
     else if (k === "u" && t) { setUnread(t.key, !isUnread(t.key)); cx.notify(); }
+    else if (k === "t" && t) openLabels(t.key, t.name, false);
+    else if (k === "g") { setShared(GROUP, !shared(GROUP)); cx.notify(); }
     else if (k === "r") toggleAsks();
     else if (k === "y" && t && this.recommended(t)) { const [q, o] = this.recommended(t); this.answerer.answer(q, o, cx); }
     else if (k === "m" && this.landMove(t)) this.ask(cx, t, this.landMove(t));
@@ -1522,7 +1637,7 @@ export default class Board extends View {
     const KEYS = [
       ["↑ ↓  j k", "move within a column"], ["← →  h l", "move across columns"], ["1 – 9", "first card of a stage"],
       ["0", "the Linear column"],
-      ["S  drag", "change the stage, or the order"], ["⇧← ⇧→", "stage before / after"], ["A", "archive / unarchive"], ["U  right-click", "mark unread / the card's menu"], ["⌫", "delete the worktree"],
+      ["S  drag", "change the stage, or the order"], ["⇧← ⇧→", "stage before / after"], ["A", "archive / unarchive"], ["U  right-click", "mark unread / the card's menu"], ["T", "labels"], ["G", "group by label"], ["⌫", "delete the worktree"],
       ["Click", "its agent beside the board"], ["⏎  double-click", "open the worktree's agent"],
       ["⏎ on an issue", "start it"], ["Space", "show / hide the side"],
       ["F", "Focus: answer what needs you"],
@@ -1559,6 +1674,8 @@ export default class Board extends View {
     if (this.part === "new") return this.summary ? this.summaryDialog() : this.newDialog();
     if (this.part === "stage") return this.stagePicker();
     if (this.part === "prlist") return this.prListView();
+    if (this.part === "park") return this.parkDialog();
+    if (this.part === "labels") return this.labelsView();
     if (this.part === "cleanup") return this.cleanupDialog();
     if (this.part === "board") return this.board(cx);
     return div().child(`board-herdr: unknown part ${this.part}`);
@@ -1590,6 +1707,17 @@ export default class Board extends View {
   }
 
   // a small link on a card (the Linear issue, the plan): a press on it isn't the card's drag, a click isn't its pick
+  // a label on a card: its color from its name, as a project's; a click filters the board to it (again: all)
+  labelPill(id, l) {
+    const [fg] = chipColor(l);
+    const on = this.labelFilter === l;
+    return div().id(id).flex_none().h(20).px(7).flex().items_center().rounded(10).border(1).border_color(on ? fg : `${fg}55`)
+      .bg(`${fg}${on ? "33" : "14"}`).cursor_pointer().hover((st) => st.bg(`${fg}2a`))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); this.labelFilter = on ? null : l; cx.notify(); })
+      .child(div().font_family(SANS).text_size(11).text_color(fg).child(l));
+  }
+
   linkPill(id, label, color, onClick) {
     return div().id(id).flex_none().h(20).px(7).flex().items_center().rounded(4).border(1).border_color(`${color}55`)
       .bg(`${color}14`).cursor_pointer().hover((st) => st.bg(`${color}2a`))
@@ -1687,6 +1815,9 @@ export default class Board extends View {
     const iss = issueOf(t.key, t.branch);
     const unread = isUnread(t.key);
     const others = t.prList.filter((p) => p.url !== pr?.url);
+    const labels = labelsOf(labelMap(), t.key);
+    const parked = parkedCount((shared(PARKED) ?? {})[t.key]);
+    if (parked) facts.push([`${plural(parked, "agent")} ended`, C.muted]);
     const left = this.doneLeft(t);
     if (left !== null) facts.push(g?.dirty ? ["uncommitted: won't auto-delete", C.you] : [left ? `deletes in ${dur(left)}` : "deleting…", C.muted]);
 
@@ -1718,16 +1849,19 @@ export default class Board extends View {
         .when(!!nudge, (el) => el.child(this.btn(`nudge-${t.key}`, `→ ${stageInfo(nudge)[1]}`, "plain", () => setStage(t.key, nudge))))
         .child(this.btn(`go-${t.key}`, t.agents.length ? "Open" : "Open terminal", "plain", (cx) => this.goTo(cx, t)))
         .when(t.stage !== "done", (el) => el.child(this.btn(`add-${t.key}`, "+ Agent", "plain", () => newAgent(t.key))))
-        .when(t.stage === "done" && isWorktree(t.space), (el) => el.child(this.btn(`del-${t.key}`, "Delete now", "plain", () => deleteWorktree(t.key))));
+        .when(t.stage === "done" && isWorktree(t.space), (el) => el.child(this.btn(`del-${t.key}`, "Delete now", "plain", () => deleteWorktree(t.key))))
+        .when(parked > 0, (el) => el.child(this.btn(`restore-${t.key}`, `↺ Restore ${plural(parked, "agent")}`, "land", () => openPark(t.key, "restore"))));
     }
 
     // a flex row (stretching, unlike h_flex) so the status bar on the left runs the card's full height
     const near = this.dropNear?.key === t.key ? this.dropNear : null;
     return div().id(`card-${t.key}`).relative().w_full().flex_none().flex().flex_row().rounded(6).overflow_hidden()
-      // on another machine, a dashed outline, like a box around it (selected, still dashed, in the accent)
-      .bg(asking ? C.youCard : C.card).border(t.machine ? 2 : 1).border_color(sel ? C.accent : t.machine ? C.remote : C.line)
-      .when(!!t.machine, (el) => el.border_dashed())
-      .cursor_pointer().hover((s) => s.bg(C.hover))
+      // selected: a tinted background and a solid 2 px outline in the accent, so the keys' place is plain; else, on
+      // another machine, a dashed outline, like a box around it
+      .bg(sel ? (asking ? C.selAsk : C.selBg) : asking ? C.youCard : C.card)
+      .border(sel || t.machine ? 2 : 1).border_color(sel ? C.accent : t.machine ? C.remote : C.line)
+      .when(!!t.machine && !sel, (el) => el.border_dashed())
+      .cursor_pointer().hover((s) => s.bg(sel ? (asking ? C.selAsk : C.selBg) : C.hover))
       // a click shows its agent beside the board, a double-click goes to it; a drag to another column moves its stage
       // a drag over another card lands above or below it (a line shows where), in its column
       .on_mouse_down("left", () => { this.dragCard = t.key; this.dropCol = null; this.dropNear = null; })
@@ -1740,7 +1874,8 @@ export default class Board extends View {
       .when(this.dragCard === t.key && Boolean(this.dropCol || this.dropNear), (el) => el.opacity(0.45))
       .on_click((e, cx) => (e.click_count === 2 ? this.goTo(cx, t) : this.pick(cx, t.key, true)))
       .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.cancelDrag(); this.sel = t.key; cx.notify();
-        openStagePicker(t.key, t.name, t.stage, true, { menu: true, prs: t.prList }); })
+        openStagePicker(t.key, t.name, t.stage, true, { menu: true, prs: t.prList, end: parkable(t).filter((a) => a.app).length,
+          restore: parkedCount((shared(PARKED) ?? {})[t.key]) }); })
       .child(div().w(3).flex_none().bg(statusColor(unread ? "done" : t.status)))
       .child(v_flex().flex_1().min_w(0).px(11).py(9).gap(5)
       .child(h_flex().w_full().gap(6).items_center()
@@ -1755,7 +1890,9 @@ export default class Board extends View {
           .child(div().w(7).h(7).rounded(4).bg(C.land)).child(mono(10, C.land, "unread")))))
       // its links, on a row of their own so the stage button above always fits: the Linear issue, and in Planning the
       // plan its skill wrote, to read in the browser
-      .when(!!iss || (t.stage === "todo" && !!g?.plan) || others.length > 0, (el) => el.child(h_flex().w_full().flex_wrap().gap(6).items_center()
+      .when(!!iss || (t.stage === "todo" && !!g?.plan) || others.length > 0 || labels.length > 0, (el) => el.child(h_flex().w_full().flex_wrap().gap(6).items_center()
+        // its labels: a click shows only the cards with that one
+        .children(labels.map((l) => this.labelPill(`lbl-${t.key}-${l}`, l)))
         .when(!!iss, (el) => el.child(this.linkPill(`iss-${t.key}`, `↗ ${iss.id}`, REF_KINDS.linear[1],
           (cx) => cx.spawn(async () => { await exec("open", [iss.url]); }))))
         // the pull requests it has besides its own branch's (that one is in the facts): one opens, more list
@@ -1793,8 +1930,8 @@ export default class Board extends View {
     const where = [i.project?.name ?? i.team?.name, i.priorityLabel && i.priorityLabel !== "No priority" ? i.priorityLabel : null]
       .filter(Boolean).join(" · ");
     return div().id(`card-${it.key}`).w_full().flex_none().flex().flex_row().rounded(6).overflow_hidden()
-      .bg(C.card).border(1).border_color(sel ? C.accent : C.line)
-      .cursor_pointer().hover((s) => s.bg(C.hover))
+      .bg(sel ? C.selBg : C.card).border(sel ? 2 : 1).border_color(sel ? C.accent : C.line)
+      .cursor_pointer().hover((s) => s.bg(sel ? C.selBg : C.hover))
       .on_mouse_down("left", () => { this.dragCard = it.key; this.dropCol = null; this.dropNear = null; })
       .when(this.dragCard === it.key && Boolean(this.dropCol), (el) => el.opacity(0.45))
       .on_click((_e, cx) => this.pick(cx, it.key))
@@ -1865,6 +2002,7 @@ export default class Board extends View {
     const cards = every.filter((t) => inScope(t.key));
     const away = every.filter((t) => !inScope(t.key)).reduce((n, t) => n + t.needs.length, 0);
     if (this.filter && !cards.some((t) => t.project === this.filter)) this.filter = null;
+    if (this.labelFilter && !cards.some((t) => labelsOf(labelMap(), t.key).includes(this.labelFilter))) this.labelFilter = null;
     if (this.peek && !shared(PEEK)) this.peek = false;
     const lc = this.linearCols(), cols = this.columns();
     const by = (k) => cols[lc.findIndex(([c]) => c === k)];
@@ -1877,6 +2015,7 @@ export default class Board extends View {
     const asked = cols.flat().flatMap((t) => (t.needs ?? []).map((x) => ({ t, x })));
     const next = asked.sort((p, q) => (p.x.tab?.changed_at ?? 0) - (q.x.tab?.changed_at ?? 0))[0];
     const projects = [...new Set(cards.map((t) => t.project))].sort();
+    const lm = labelMap(), labelsAll = allLabels(Object.fromEntries(cards.map((t) => [t.key, labelsOf(lm, t.key)]).filter(([, l]) => l.length)));
     // the leftover worktrees of the repos shown
     const leftover = (machineFilter() ?? "") !== "" ? [] // they're this computer's
       : this.orphans.filter((o) => allSpaces() || o.repo === repoKey(activeSpace()?.id));
@@ -1912,6 +2051,10 @@ export default class Board extends View {
         .child(this.filterChip(null, "all", cards.length))
         .children(projects.map((p) => this.filterChip(p, p, cards.filter((t) => t.project === p).length,
           cards.some((t) => t.project === p && t.needs.length))))))
+      // the labels in use: a click shows only that one's cards; Group puts each column's cards under their first label
+      .when(labelsAll.length > 0, (el) => el.child(div().w(1).h(16).mx(4).bg(C.line2))
+        .children(labelsAll.map((l) => this.labelFilterChip(l, cards.filter((t) => labelsOf(lm, t.key).includes(l)).length)))
+        .child(this.labelFilterChip(null, 0)))
       .when(leftover.length > 0, (el) => el.child(this.btn("leftover", `${plural(leftover.length, "leftover worktree")} · clean up`, "plain",
         () => openOverlay({ mod: MOD, kind: "dialog", width: 640, height: 480, props: { part: "cleanup", orphans: leftover } }))))
       .child(div().flex_1())
@@ -1950,7 +2093,16 @@ export default class Board extends View {
         .on_mouse_up("left", (_e, cx) => this.dropCard(cx))
         .child(head)
         .when(!folded, (el) => el.child(v_flex().id(`list-${k}`).w_full().flex_1().min_h(0).gap(8).overflow_y_scrollbar().track_scroll(this.scroll[k])
-          .children(list.map((t) => (k === "linear" ? this.linearCard(t) : this.card(t))))));
+          .children(list.map((t, i) => {
+            if (k === "linear") return this.linearCard(t);
+            // grouped by label: the group's name over its first card (in the card's own slot, so scrolling to the
+            // n-th card still lands on it)
+            const l = labelsOf(labelMap(), t.key)[0] ?? null;
+            if (!shared(GROUP) || (i > 0 && (labelsOf(labelMap(), list[i - 1].key)[0] ?? null) === l)) return this.card(t);
+            return v_flex().w_full().flex_none().gap(6)
+              .child(div().pt(i ? 6 : 0).child(mono(10, l ? chipColor(l)[0] : C.dim, l ? `# ${l.toUpperCase()}` : "NO LABEL")))
+              .child(this.card(t));
+          }))));
     };
 
     // the columns with cards share what the folded and empty ones leave, but never below COL_MIN: narrower than that
@@ -2030,6 +2182,18 @@ export default class Board extends View {
     const first = this.col && this.visible().find((t) => t.stage === this.col);
     if (first) this.sel = first.key;
     this.grab(cx);
+  }
+
+  // a label in the filters (null: Group by label, on or off)
+  labelFilterChip(l, n) {
+    const on = l === null ? Boolean(shared(GROUP)) : this.labelFilter === l;
+    return h_flex().id(`lchip-${l ?? "group"}`).flex_none().gap(6).px(8).py(2).rounded(10).items_center().cursor_pointer()
+      .border(1).border_color(on ? C.accentDim : C.line2).bg(on ? "#1c1926" : "#00000000")
+      .hover((st) => st.bg(C.hover))
+      .on_click((_e, cx) => { if (l === null) setShared(GROUP, !on); else this.labelFilter = on ? null : l; cx.notify(); })
+      .when(l !== null, (el) => el.child(div().w(7).h(7).rounded(4).bg(chipColor(l)[0])).child(mono(11, on ? C.text : C.soft, l))
+        .child(mono(11, C.dim, String(n))))
+      .when(l === null, (el) => el.child(mono(11, on ? C.text : C.soft, on ? "▤ grouped  G" : "▤ group  G")));
   }
 
   filterChip(p, label, n, alert) {
@@ -2358,7 +2522,7 @@ export default class Board extends View {
   // another dialog takes over from this one (a Linear card's stage, the summary's E, the dialog's Esc back)
   async close() {
     if (this.handoff) return;
-    if (["stage", "new", "cleanup", "prs-settings", "prlist"].includes(this.part)) setShared(REFOCUS, Date.now());
+    if (["stage", "new", "cleanup", "prs-settings", "prlist", "park", "labels"].includes(this.part)) setShared(REFOCUS, Date.now());
   }
 
   // ---- leftover worktrees -----------------------------------------------------------------------------------
@@ -2489,6 +2653,99 @@ export default class Board extends View {
       })));
   }
 
+  // End agents / Restore: what can come back, how; ⏎ does it, and the dialog closes once every one did
+  parkDialog() {
+    const p = props() ?? {};
+    const end = p.mode === "end";
+    const list = end ? parkable(worktrees().find((x) => x.key === p.space)) : (shared(PARKED) ?? {})[p.space]?.agents ?? [];
+    const can = end ? list.filter((a) => a.app) : list;
+    const others = list.length - can.length;
+    const kinds = [["claude", "Claude Code"], ["opencode", "OpenCode"]]
+      .map(([k, l]) => [can.filter((a) => a.app === k).length, l]).filter(([n]) => n).map(([n, l]) => `${n} ${l}`).join(" · ");
+    const run = this.run, busy = run?.state === "running";
+    const failed = (run?.kept ?? []).filter((a) => a.app);
+    const go = (cx) => {
+      if (busy || !can.length) return;
+      this.run = { state: "running", at: null };
+      cx.notify();
+      cx.spawn(async (cx) => {
+        const kept = end ? (await parkAgents(p.space, (a) => { this.run.at = a.title; cx.notify(); })).kept : await restoreAgents(p.space);
+        this.run = { state: "done", kept: end ? kept : kept.map((a) => ({ ...a, app: a.app ?? "?" })) };
+        if (!this.run.kept.some((a) => a.app)) closeOverlay(p.overlay);
+        cx.notify();
+      });
+    };
+    const btn = (id, text, primary, onClick) => h_flex().id(id).flex_none().h(28).px(12).items_center().rounded(6).border(1)
+      .border_color(primary ? C.accent : C.line2).bg(primary ? C.accent : C.raised).text_color(primary ? "#0f0f11" : C.text)
+      .font_family(SANS).text_size(12).cursor_pointer().hover((st) => st.opacity(0.85))
+      .when(busy, (el) => el.opacity(0.5)).on_click((_e, cx) => onClick(cx)).child(text);
+    return v_flex().id("park").size_full().p(18).gap(10).bg("#18181b").text_color(C.text).track_focus(this.h)
+      .on_key_down((e, cx) => {
+        if (e.key === "enter" && !e.is_held && !run) go(cx);
+        else if (e.key === "escape" && !busy) closeOverlay(p.overlay);
+        else return;
+        cx.stop_propagation();
+      })
+      .child(div().font_family(SANS).text_size(16).font_weight(600)
+        .child(end ? `End the agents of ${trunc(String(p.name ?? ""), 34)}?` : `Bring back the agents of ${trunc(String(p.name ?? ""), 30)}?`))
+      .child(div().font_family(SANS).text_size(12).text_color(C.muted).child(end
+        ? "Archived. Ending them frees the machine; Restore brings each one back in its terminal, in the same conversation."
+        : "Each one resumes in its terminal, in the conversation it was in when it was ended."))
+      .child(mono(11, C.soft, can.length ? kinds || plural(can.length, "agent") : end ? "No agent here can be resumed." : "Nothing to restore."))
+      .when(others > 0, (el) => el.child(mono(11, C.dim, `${plural(others, "other agent")} keep${others === 1 ? "s" : ""} running: no way to resume ${others === 1 ? "it" : "them"}`)))
+      .when(busy, (el) => el.child(h_flex().gap(8).items_center().child(icon("spinner", 12, C.work).spin(900))
+        .child(div().min_w(0).truncate().child(mono(11, C.muted, end ? `Ending ${trunc(String(run.at ?? ""), 40)}…` : "Restoring…")))))
+      .when(failed.length > 0, (el) => el.child(v_flex().gap(3).children(failed.slice(0, 4).map((a) =>
+        div().truncate().child(mono(11, C.red, `${trunc(cleanTitle(a.title ?? a.address) ?? a.address, 30)}: ${a.why}`))))))
+      .child(div().flex_1())
+      .child(h_flex().gap(8).items_center()
+        .child(div().flex_1())
+        .child(btn("park-no", run?.state === "done" ? "Close" : end ? "Keep them running" : "Not now", false, () => { if (!busy) closeOverlay(p.overlay); }))
+        .when(can.length > 0 && !run, (el) => el.child(btn("park-go", `${end ? "End" : "Restore"} ${plural(can.length, "agent")}  ⏎`, true, go))));
+  }
+
+  // a worktree's labels: type to find one, ⏎ turns the first on or off (or makes the one typed, when it's new);
+  // a click turns any on or off
+  initLabels(cx) {
+    this.lq = "";
+    this.lin = InputState.new({ placeholder: "Find or add a label" });
+    this.lin.on("change", (_e, cx) => { this.lq = this.lin.value(); cx.notify(); });
+    this.lin.on("submit", (_e, cx) => {
+      const { list, create } = suggest(allLabels(labelMap()), this.lq);
+      const pick = create ?? list[0];
+      if (pick) this.toggleLabel(pick, cx);
+    });
+    this.lin.focus();
+    cx.timer.after(300, () => this.lin.focus());
+  }
+
+  toggleLabel(label, cx) {
+    setShared(LABELS, toggleLabel(labelMap(), (props() ?? {}).space, label));
+    this.lin.set_value("");
+    this.lq = "";
+    cx.notify();
+  }
+
+  labelsView() {
+    const p = props() ?? {};
+    const map = labelMap(), mine = labelsOf(map, p.space);
+    const { list, create } = suggest(allLabels(map), this.lq);
+    const row = (id, l, on, text) => h_flex().id(id).w_full().flex_none().h(28).px(8).gap(8).items_center().rounded(6).cursor_pointer()
+      .hover((st) => st.bg(C.raised))
+      .on_click((_e, cx) => this.toggleLabel(l, cx))
+      .child(div().w(12).flex_none().child(mono(11, C.accent, on ? "✓" : "")))
+      .child(div().w(8).h(8).flex_none().rounded(4).bg(chipColor(l)[0]))
+      .child(div().flex_1().min_w(0).truncate().font_family(SANS).text_size(13).text_color(C.text).child(text ?? l));
+    return v_flex().id("labels").size_full().p(6).gap(4).bg("#18181b")
+      .on_key_down((e, cx) => { if (e.key === "escape") { closeOverlay(p.overlay); cx.stop_propagation(); } })
+      .child(div().px(4).pt(2).truncate().child(mono(10, C.dim, `LABELS · ${trunc(String(p.name ?? ""), 26)}`)))
+      .child(Input.new(this.lin).h(30).px(8).rounded(6).border(1).border_color(C.accentDim).bg(C.main).font_family(SANS).text_size(12).text_color(C.text))
+      .child(v_flex().id("labels-rows").max_h(240).overflow_y_scrollbar()
+        .when(!!create, (el) => el.child(row("label-new", create, false, `+ Create "${create}"`)))
+        .children(list.map((l, i) => row(`label-${i}`, l, mine.includes(l))))
+        .when(!list.length && !create, (el) => el.child(div().px(8).py(6).child(mono(11, C.dim, "Type a label: pesquisa, feature, bug…")))));
+  }
+
   // the stages it offers: a Linear card's (only), else every one
   stages() {
     const only = (props() ?? {}).only;
@@ -2501,6 +2758,8 @@ export default class Board extends View {
     if (stage === "unread") { closeOverlay(p.overlay); setUnread(p.space, !isUnread(p.space)); return; }
     if (stage === "open") { closeOverlay(p.overlay); if (p.issue?.url) exec("open", [p.issue.url]); return; }
     if (stage === "prs") { this.handoff = true; closeOverlay(p.overlay); openPrList(p.title, p.prs ?? [], false); return; }
+    if (stage === "labels") { this.handoff = true; closeOverlay(p.overlay); openLabels(p.space, p.title, false); return; }
+    if (stage === "park" || stage === "restore") { this.handoff = true; closeOverlay(p.overlay); openPark(p.space, stage === "park" ? "end" : "restore"); return; }
     if (p.issue) {
       if (!stage || stage === "delete") return;
       this.handoff = true;
@@ -2530,6 +2789,9 @@ export default class Board extends View {
         else if (k === "u" && acts.includes("unread")) this.choose("unread");
         else if (k === "o" && acts.includes("open")) this.choose("open");
         else if (k === "p" && acts.includes("prs")) this.choose("prs");
+        else if (k === "t" && acts.includes("labels")) this.choose("labels");
+        else if (k === "e" && acts.includes("park")) this.choose("park");
+        else if (k === "r" && acts.includes("restore")) this.choose("restore");
         else if ((k === "backspace" || k === "delete") && p.deletable) this.choose("delete");
         else if (k === "escape") closeOverlay(p.overlay);
         else return;
@@ -2540,6 +2802,9 @@ export default class Board extends View {
         const acts = p.actions;
         const look = (a) => (a === "open" ? ["↗", "Open in Linear", "O", REF_KINDS.linear[1]]
           : a === "prs" ? ["⇅", `Pull requests (${p.prs?.length ?? 0})`, "P", C.accent]
+          : a === "labels" ? ["#", "Labels…", "T", C.accent]
+          : a === "park" ? ["■", `End agents (${p.end})`, "E", C.muted]
+          : a === "restore" ? ["↺", `Restore agents (${p.restore})`, "R", C.land]
           : isUnread(p.space) ? ["○", "Mark as read", "U", C.land] : ["●", "Mark as unread", "U", C.land]);
         return el
           .children(acts.map((a, i) => {

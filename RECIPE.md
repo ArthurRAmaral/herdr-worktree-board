@@ -73,8 +73,9 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
     (past 4 px, with the grabbing cursor), a trackpad's sideways scroll, or the wheel with Shift; a thin bar at the
     bottom shows where you are, and moving the selection pans to its column. Each column scrolls on its own. The column
     the sidebar marked has a border and a tint in its color.
-  - **A card**: a 3 px left bar in the worktree's status color; on another machine, a 2 px dashed outline (`#9a99a0`; the
-    accent when selected, still dashed), like a box around it; the project chip (one of 8 colors, from its name), the
+  - **A card**: a 3 px left bar in the worktree's status color; on another machine, a 2 px dashed outline (`#9a99a0`),
+    like a box around it; selected (by a click or the keys), a solid 2 px outline in the accent and a tinted background
+    (`#262139`, `#2d2615` for one waiting for you) that hovering keeps (the Linear column's cards too); the project chip (one of 8 colors, from its name), the
     branch, a machine tag (the machine icon and its name, such as `devbox`, or `devbox · offline` dimmed) when it's on
     another machine, the
     stage button (`● In progress ▾`, tinted in the stage color); the title (14 px semibold); when it has them, a row of
@@ -83,7 +84,8 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
     popup takes its content's height, so the list has a max height, not `flex_1`, which would leave it empty)
     and, in Planning, `📄 Plan ready` (`#53cf91`, opens the plan); marked unread, a green bar and `● unread` by the
     title. A right-click opens its menu at the pointer: `● Mark as unread  U` (or `○ Mark as read`), `⇅ Pull requests
-    (3)  P` when it has several, the stages, `× Delete worktree…  ⌫` (for a worktree under any machine's
+    (3)  P` when it has several, `# Labels…  T`, `■ End agents (n)  E` when it has agents that can come back,
+    `↺ Restore agents (n)  R` when it has ones ended, the stages, `× Delete worktree…  ⌫` (for a worktree under any machine's
     `~/.herdr/worktrees`); a Linear card's: `↗ Open in Linear  O` and Planning / In progress; the agents
     counted (`2 waiting · 1 working`) and, with sub-agents, `· 3 sub-agents` counted too; up to 4 agent lines (status
     icon, program icon, what it says it's doing, a `+2` sub-agent pill, its age) and `+N more`; the question box; the
@@ -192,6 +194,28 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   trip, and one after another the first read of a big fleet took minutes.
 - **Unread** (`boardh.unread`, space → when): your mark, set from the menu or `U`, cleared when any of its agents is
   shown (beside the board, in its place, or to answer).
+- **Labels** (pure rules in `labels-rules.js`; `boardh.labels`, space → labels): your own words for a worktree
+  (pesquisa, feature, bug…), none built in. `T` or the menu's `# Labels…` opens a field over the list of every label in
+  use (the most used first): typing filters it, ⏎ turns the first one on or off, or makes the one typed when no label
+  is exactly it; a click turns any on or off. One spelling each: trimmed, single spaces, lower case, at most 24
+  characters. A card shows them as round pills in its links row, colored from the name as a project chip; the filter
+  row lists them with their counts after the projects, and a click there or on a card's pill shows only that label's
+  cards (again: all); `/` finds them too. `G` or `▤ group` (`boardh.group`) puts each column's cards under their first
+  label (`# BUG` over the first of each group, in the card's own slot so scrolling to a card still lands on it), the
+  ones without one last (`NO LABEL`). A space that is gone drops its labels.
+- **Ending agents, bringing them back** (pure rules in `park-rules.js`; `boardh.parked`, space → `{at, agents:
+  [{address, app, session, cwd, argv, title}]}`): archiving a worktree with agents that can come back (Claude Code,
+  OpenCode, on its panes or started by them) opens `End the agents of …?`; `End n agents  ⏎` frees the machine. For
+  each one: `hc get --json` gives its terminal's pid, folder and the agent's own argv; its shell's child is the agent
+  (`pgrep -P`), and Claude Code's `~/.claude/sessions/<pid>.json` names its session; OpenCode's is the folder's one in
+  `opencode session list --format json` whose title the terminal shows (`OC | <title>`), else the folder's newest.
+  The session is kept, then that process alone gets `kill -TERM` on its machine: the terminal's shell runs the agent
+  and stays, so the card keeps its terminals (`n agents ended`). Others (no session found, another agent) keep
+  running and the dialog says why. Restore (the card's `↺ Restore n agents`, the menu's, or offered on leaving
+  Archived) types `cd <folder> && <agent> <its flags> --resume <id>` (OpenCode: `-s <id>`) in that terminal with `hc
+  send` (its first message is not repeated; a session it was resuming, `-c` or `-p` are dropped), or opens a new tab
+  in the space with it when that terminal is gone, and forgets the ones it brought back. A space that is gone drops
+  its record.
 - **Plans.** git's read of each worktree also looks for the newest `tmp/*/plan/report.md` or `report.html` (the HTML
   when both); a Planning card with one shows `📄 Plan ready`. A click opens a local HTML as it is; Markdown, or a file
   on another machine (read with `readTextFile(…, {on})`), is written as a page under `~/.config/herdr-app/cache/plans/`
@@ -357,6 +381,10 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   - `asks.js`: `Answerer` delivers an answer (used by the board's cards); `AsksPanel` is the `asks` part.
   - `asks-engine.js`: the Asks detection; `asks-state.js`: the record and `asks.json`.
   - `asks-rules.js`: what becomes of an answer in flight (sending or failed), pure, tested by `test/asks-rules.test.mjs`.
+  - `labels-rules.js`: a worktree's labels (spelling, on/off, the list in use, the field's suggestions, grouping), pure,
+    tested by `test/labels-rules.test.mjs`.
+  - `park-rules.js`: ending agents and bringing them back (which can, the command that resumes one, OpenCode's
+    session, the line typed in the shell), pure, tested by `test/park-rules.test.mjs`.
   - `nav-order.js`: the order's rules and a worktree's main agent, pure, tested by `test/nav-order.test.mjs`.
   - `prs-rules.js`: the PRs view's rules, pure (no `herdr` import), tested by `node --test test/*.test.mjs` from the
     mod's folder: the searches, the GraphQL query, normalizing, CODEOWNERS, the columns and the count.

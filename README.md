@@ -21,8 +21,13 @@ The sidebar lists the worktrees by stage, each with its agents, in the order you
 goes to its main agent, not a sub-agent that agent started.
 
 - **Right-click a card** for its menu: Mark as unread (the card stays green, as a finished agent, until you open one
-  of its agents; `U` does it too), its pull requests when it has several, its stage, and Delete worktree (also on
-  another machine; Herdr's own Remove worktree asks first). A Linear card's menu opens it in Linear or starts it.
+  of its agents; `U` does it too), its pull requests when it has several, its labels, End agents / Restore agents, its
+  stage, and Delete worktree (also on another machine; Herdr's own Remove worktree asks first). A Linear card's menu
+  opens it in Linear or starts it.
+- **Labels**: your own words for a worktree (pesquisa, feature, bug…): `T` opens a field where typing a new one makes
+  it. Cards show them; the filter row filters by them, and `G` groups each column's cards by label.
+- **Archive without the load**: archiving a worktree offers to end its Claude Code and OpenCode agents, to free the
+  machine. Restore brings each one back in its terminal, in the same conversation (`claude --resume`, `opencode -s`).
 - **Drag**: a card to another column changes its stage; within a column, it changes its place. Drag the board's
   background to scroll it sideways, as in Linear.
 - **An agent beside the board**: a click on a card shows its agent's terminal at the right, and the board stays
