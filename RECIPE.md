@@ -73,7 +73,7 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
     (past 4 px, with the grabbing cursor), a trackpad's sideways scroll, or the wheel with Shift; a thin bar at the
     bottom shows where you are, and moving the selection pans to its column. Each column scrolls on its own. The column
     the sidebar marked has a border and a tint in its color.
-  - **A card**: a 3 px left bar in the worktree's status color; on another machine, a dashed outline (`#5c5b63`; the
+  - **A card**: a 3 px left bar in the worktree's status color; on another machine, a 2 px dashed outline (`#9a99a0`; the
     accent when selected, still dashed), like a box around it; the project chip (one of 8 colors, from its name), the
     branch, a machine tag (the machine icon and its name, such as `devbox`, or `devbox · offline` dimmed) when it's on
     another machine, the

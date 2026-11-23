@@ -69,7 +69,7 @@ const C = {
   line: "#1e1e20", line2: "#2a2a30", text: "#e4e4e7", soft: "#c8c8cc", muted: "#8a898e", dim: "#56555b",
   accent: "#b4a0db", accentDim: "#625187",
   you: "#ffb406", youBg: "#1f1a10", youCard: "#1b1912", youAsk: "#241f12", youLine: "#4a3a12",
-  remote: "#5c5b63", // the dashed outline of a card on another machine
+  remote: "#9a99a0", // the dashed outline of a card on another machine
   work: "#8f7fd1", land: "#53cf91", landBg: "#12201a", landLine: "#1d3a2c", done: "#6fb3f2", red: "#e0707f",
 };
 // the stages a worktree goes through, in order: the board's columns and the sidebar's groups
@@ -1725,7 +1725,7 @@ export default class Board extends View {
     const near = this.dropNear?.key === t.key ? this.dropNear : null;
     return div().id(`card-${t.key}`).relative().w_full().flex_none().flex().flex_row().rounded(6).overflow_hidden()
       // on another machine, a dashed outline, like a box around it (selected, still dashed, in the accent)
-      .bg(asking ? C.youCard : C.card).border(1).border_color(sel ? C.accent : t.machine ? C.remote : C.line)
+      .bg(asking ? C.youCard : C.card).border(t.machine ? 2 : 1).border_color(sel ? C.accent : t.machine ? C.remote : C.line)
       .when(!!t.machine, (el) => el.border_dashed())
       .cursor_pointer().hover((s) => s.bg(C.hover))
       // a click shows its agent beside the board, a double-click goes to it; a drag to another column moves its stage
