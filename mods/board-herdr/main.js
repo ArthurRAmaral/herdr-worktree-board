@@ -51,7 +51,7 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle, Popup } from "gpui-base";
 import { spaces, agents, panes, run, props, exec, shared, setShared, window, nextCommand, layout, openOverlay, closeOverlay,
-  knownAgents, home, focused, setAgentOrder, terminals, notify, machines, readTextFile, writeTextFile, appHome } from "herdr";
+  knownAgents, home, focused, setAgentOrder, terminals, notify, machines, readTextFile, writeTextFile, appHome, hc } from "herdr";
 import { Engine } from "./asks-engine.js";
 import { loadConfig } from "./asks-state.js";
 import { AsksPanel, Answerer, pickable, waitingAsks, questionsOf } from "./asks.js";
@@ -62,6 +62,8 @@ import { planPage } from "./md-html.js";
 import { checks, parseClonePrs, mergePrs, timedOut, ghStall, stallProblem } from "./worktree-prs.js";
 import { mainAgent, addNew, moveKey, toFront, byOrder, seq } from "./nav-order.js";
 import { readBoardConfig, firstMessage, moveInLinear, todoColumn, canDrop, issueFromBranch, startedState } from "./linear-rules.js";
+import { readTagConfig, catalog, parseTags, formatTags, toggleTag, unionTags, toSeed, sessionStage, sessions, cleanTag, tagColor,
+  TAGS_LABEL, STAGE_LABEL, TAGGED_LABEL } from "./tags.js";
 
 const MOD = "board-herdr";
 const C = {
@@ -144,6 +146,9 @@ const STARTING = "boardh.starting"; // shared: Linear issue ID -> when its start
 const LINEAR_ORG = "boardh.linearOrg"; // shared: {urlKey, teamKeys}: your Linear workspace, as the board last read it
 const SPACE_ISSUES = "boardh.spaceIssues"; // shared: space id -> {id, url}: the Linear issue its worktree was started for
 const LINEAR_MOVES = "boardh.linearMoves"; // shared: [{uuid, teamId, id, at}]: issues New agent started in progress, for the board to move in Linear
+const TAGS = "boardh.tags"; // shared: [{name, color}]: the tags you made on the board
+const UNIT = "boardh.unit"; // shared: "session" for a card per session, else a card per worktree
+const TAG_CONFIG = "boardh.tagConfig"; // shared: board.json's {tags, tagLabel, tagList}, read by the sidebar's copy
 const MOVE_MS = 600000; // a queued move older than this is dropped, not made late
 
 // one call per folder: the repo, its branch, how far it is from the default branch, and what's uncommitted
@@ -409,6 +414,50 @@ function setStage(spaceId, stage) {
   }
 }
 
+// ---- sessions and tags ---------------------------------------------------------------------------------------------
+
+// tags.js: a session is an agent you started, with what it started in the same worktree; its tags and its stage are
+// labels on its terminal. The board shows a card per worktree or per session (G), in the same stage columns
+const tagConf = () => shared(TAG_CONFIG) ?? readTagConfig(null);
+const bySessions = () => shared(UNIT) === "session";
+const knownStage = (k) => STAGES.some(([x]) => x === k);
+// each live terminal's labels, by address
+const labelsBy = () => new Map(terminals().filter((t) => !t.state || t.state === "live").map((t) => [t.address, t.labels ?? {}]));
+// every tag: yours, board.json's, the shared list board.json names, then any a live session has
+function allTags() {
+  const c = tagConf();
+  const used = [...labelsBy().values()].flatMap((l) => parseTags(l[TAGS_LABEL]));
+  return catalog([shared(TAGS) ?? [], c.tags, c.tagList ? shared(c.tagList) ?? [] : []], used);
+}
+const tagInfo = (name) => allTags().find((t) => t.name === name) ?? { name, color: tagColor(name) };
+// a session's tags, as its terminal's label says
+const tagsOfSession = (address) => parseTags(labelsBy().get(address)?.[TAGS_LABEL]);
+// a session's tags set on its terminal (an empty list takes them all off, and they stay off)
+const setSessionTags = (address, list) => hc(["label", address, `${TAGS_LABEL}=${formatTags(list)}`, `${TAGGED_LABEL}=1`]);
+// a session's own stage, on its terminal; it comes in at the top of the stage, as a worktree does
+function setSessionStage(address, stage) {
+  setShared(ORDER, toFront(shared(ORDER) ?? [], address));
+  return hc(["label", address, `${STAGE_LABEL}=${stage}`]);
+}
+// a card's stage: a session's on its terminal, a worktree's in shared state
+const setCardStage = (t, stage) => (t.session ? setSessionStage(t.session, stage) : setStage(t.key, stage));
+// a new tag in the catalog (none if it's there already); its clean name
+function addTag(name) {
+  const n = cleanTag(name);
+  if (n && !allTags().some((t) => t.name === n)) setShared(TAGS, [...(shared(TAGS) ?? []), { name: n, color: tagColor(n) }]);
+  return n;
+}
+// sessions the board never tagged take board.json's tagLabel once (an agent's group, say)
+async function seedTags() {
+  for (const [address, list] of toSeed(terminals(), tagConf().tagLabel)) await setSessionTags(address, list);
+}
+// a session's tags, at the pointer (or centered for T); on a worktree's card, its main session's
+function openTagPicker(address, title, pointer) {
+  if (!address) return;
+  openOverlay({ mod: MOD, props: { part: "tags", address, title }, kind: pointer ? "popup" : "dialog",
+    width: 260, height: Math.min(520, 96 + allTags().length * 30) });
+}
+
 // every space as a worktree: its agents (the most urgent first, then the one used last), each with the sub-agents it
 // started, all of them counted, its main agent (where a click on it goes) and its stage
 function worktrees() {
@@ -430,6 +479,7 @@ function worktrees() {
   }
   const stageOf = stageReader(list);
   const titles = shared(SPACE_TITLES) ?? {};
+  const labels = labelsBy();
   return spaces().map((s) => {
     const tabs = new Map(s.tabs.map((t) => [t.id, t]));
     const ags = list.filter((a) => a.space === s.id)
@@ -437,7 +487,11 @@ function worktrees() {
       .sort((x, y) => RANK[y.a.status] - RANK[x.a.status] || y.at - x.at);
     const mainAt = mainAgent(ags.map((x) => x.a.address), parentOf);
     const main = ags.find((x) => x.a.address === mainAt) ?? null;
+    const byAddress = new Map(ags.map((x) => [x.a.address, x]));
+    const groups = sessions(ags.map((x) => x.a.address), parentOf).map((g) => ({ root: byAddress.get(g.root), members: g.members.map((m) => byAddress.get(m)),
+      tags: parseTags(labels.get(g.root)?.[TAGS_LABEL]), ownStage: labels.get(g.root)?.[STAGE_LABEL] }));
     return {
+      sid: s.id, sessions: groups, tags: unionTags(groups.map((g) => g.tags)),
       key: s.id, space: s, agents: ags, main, subs: ags.flatMap((x) => x.subs), needs: ags.filter((x) => x.a.status === "blocked"),
       status: s.status, stage: stageOf(s),
       at: Math.max(0, ...ags.map((x) => x.at), ...s.tabs.map((t) => t.changed_at ?? 0)),
@@ -478,7 +532,7 @@ function toggleAsks(show) {
 // the questions waiting in a worktree, its agents' and their sub-agents', newest first
 function asksIn(t) {
   const mine = new Set([...t.agents.map((x) => x.a.address), ...t.subs.map((s) => s.address)]);
-  return waitingAsks().filter((a) => a.space === t.key || mine.has(a.address));
+  return waitingAsks().filter((a) => (!t.session && a.space === t.sid) || mine.has(a.address));
 }
 const askColor = (kind) => ({ APPROVAL: C.you, DECISION: C.accent, QUESTION: C.work }[kind] ?? C.dim);
 
@@ -512,6 +566,10 @@ async function boardConfig() {
     return readBoardConfig(JSON.parse(await readTextFile(`${appHome()}/board.json`)));
   } catch { return readBoardConfig(null); } // no board.json
 }
+// board.json's tags ({tags, tagLabel, tagList}, tags.js); none without the file
+async function tagConfig() {
+  try { return readTagConfig(JSON.parse(await readTextFile(`${appHome()}/board.json`))); } catch { return readTagConfig(null); }
+}
 // the skills ($2…) installed for the repo at $1: a SKILL.md in ~/.claude/skills/<name>/ or the repo's .claude/skills/<name>/
 const SKILLS = `TOP="$1"; shift
 for s in "$@"; do
@@ -544,11 +602,12 @@ function editIssue(p) {
 // the stage picker: at the pointer for a click, centered for a key; for a Linear card (issue), only the stages it can
 // start in (only), and a pick opens its summary
 // menu: a right-click's, with an action on top: Mark as unread / read for a worktree, Open in Linear for an issue
-function openStagePicker(space, title, stage, pointer, { only, issue, menu, prs } = {}) {
+function openStagePicker(space, title, stage, pointer, { only, issue, menu, prs, session, tagsOf } = {}) {
   const deletable = !issue && Boolean(spaces().find((s) => s.id === space && removable(s)));
   // the actions on top: Mark as unread / read or Open in Linear, and a worktree's pull requests when it has several
-  const actions = menu ? [issue ? (issue.url ? "open" : null) : "unread", prs?.length > 1 ? "prs" : null].filter(Boolean) : [];
-  openOverlay({ mod: MOD, props: { part: "stage", space, title, stage, deletable, only, issue, actions, prs: actions.includes("prs") ? prs : null },
+  const actions = menu ? [issue ? (issue.url ? "open" : null) : "unread", tagsOf ? "tags" : null, prs?.length > 1 ? "prs" : null].filter(Boolean) : [];
+  openOverlay({ mod: MOD, props: { part: "stage", space, title, stage, deletable, only, issue, actions, prs: actions.includes("prs") ? prs : null,
+    session: session ?? null, tagsOf: tagsOf ?? null },
     kind: pointer ? "popup" : "dialog",
     width: 250, height: 44 + (only?.length ?? STAGES.length) * 30 + (deletable ? 40 : 0) + (actions.length ? actions.length * 30 + 10 : 0) });
 }
@@ -687,6 +746,7 @@ export default class Board extends View {
     this.now = Date.now();
     if (this.part === "new") { this.initNew(cx); return; }
     if (this.part === "stage") { this.initStage(cx); return; }
+    if (this.part === "tags") { this.initTags(cx); return; }
     if (this.part === "cleanup") { this.initCleanup(cx); return; }
     if (this.part === "prs-settings") { this.prsSet = new PrsSettings(); this.prsSet.init(cx); return; }
     if (this.part === "prlist") { this.at = 0; this.h = cx.focus_handle(); this.h.focus(); cx.timer.after(300, () => this.h.focus()); return; }
@@ -717,6 +777,8 @@ export default class Board extends View {
         cx.timer.every(1000, (cx) => this.engine.tick(cx));
         // board.json's features: off, the PRs view and its row go, and GitHub isn't read for it
         const features = (cx) => cx.spawn(async (cx) => {
+          const tc = await tagConfig();
+          if (JSON.stringify(tc) !== JSON.stringify(shared(TAG_CONFIG))) setShared(TAG_CONFIG, tc);
           const f = (await boardConfig()).features;
           if (JSON.stringify(f) !== JSON.stringify(shared(FEATURES))) setShared(FEATURES, f);
           if (!f.prs && shownView() === "prs") openBoard(null);
@@ -724,6 +786,7 @@ export default class Board extends View {
         });
         features(cx);
         cx.timer.every(30000, features);
+        cx.timer.every(5000, (cx) => cx.spawn(async () => { await seedTags(); }));
         // the PRs view's data: read here, where it is always drawn, so the sidebar can count it
         this.prsFeed = new PrsFeed();
         cx.timer.every(1000, (cx) => { if (prsFeature()) this.prsFeed.tick(cx); });
@@ -767,6 +830,7 @@ export default class Board extends View {
     this.asks = {}; // address -> the question on its screen
     this.asking = false;
     this.filter = null; // a project, or null for all
+    this.tagFilter = null; // a tag, or null for all
     this.sel = null; // the selected worktree (space id)
     this.focus = false;
     this.peek = false; // Space: the selected worktree's agent beside the board, following the selection
@@ -809,8 +873,28 @@ export default class Board extends View {
 
   // ---- data -------------------------------------------------------------------------------------------------
 
-  // every worktree as a card, with what git and gh said about its folder
+  // the board's cards: a card per worktree, or per session (G)
   get cards() {
+    const trees = this.trees;
+    return bySessions() ? trees.flatMap((w) => this.sessionCards(w)) : trees;
+  }
+
+  // a worktree's sessions as cards: the worktree's card narrowed to a session's agents (the ones it started in the
+  // worktree are on it too), with the session's stage, tags and name; a worktree without agents keeps its own card
+  sessionCards(w) {
+    if (!w.sessions.length) return [w];
+    return w.sessions.map((g) => {
+      const subs = g.members.flatMap((x) => x.subs);
+      const status = g.members.map((x) => x.a.status).sort((x, y) => RANK[y] - RANK[x])[0];
+      return { ...w, key: g.root.a.address, session: g.root.a.address, agents: g.members, main: g.root, subs,
+        needs: g.members.filter((x) => x.a.status === "blocked"), status, tags: g.tags,
+        stage: sessionStage(g.ownStage, w.stage, knownStage), at: Math.max(0, ...g.members.map((x) => x.at)),
+        name: shortTitle(agentTitle(g.root.a) ?? "") || cleanTitle(g.root.a.title) || w.name, worktree: w.name };
+    });
+  }
+
+  // every worktree as a card, with what git and gh said about its folder
+  get trees() {
     const paneList = panes();
     return worktrees().map((w) => {
       const cwd = place(w.space, paneList);
@@ -1004,7 +1088,7 @@ export default class Board extends View {
 
   // what the top bar and the sidebar need from git: the count, and each space's repo; written only when it changed
   share() {
-    const cards = this.cards;
+    const cards = this.trees;
     const counts = { tasks: cards.filter((t) => t.stage !== "archived").length, needs: cards.reduce((n, t) => n + t.needs.length, 0),
       when: new Date().toTimeString().slice(0, 5), problem: this.problem, offline: this.offline, linear: this.linear.error,
       linearProblem: this.linearProblem };
@@ -1073,6 +1157,7 @@ export default class Board extends View {
 
   // when a card in Done goes (null: never, it isn't a worktree here or has no time; 0: due)
   doneLeft(t) {
+    if (t.session) return null; // a session's Done removes nothing: only a worktree's does
     const at = (shared(STAGE_AT) ?? {})[t.key];
     return t.stage !== "done" || !isWorktree(t.space) || !at ? null : Math.max(0, at + DONE_MS - Date.now());
   }
@@ -1080,7 +1165,7 @@ export default class Board extends View {
   // worktrees 3 days in Done: removed (space closed, git worktree remove; the branch and its commits stay), unless
   // they have uncommitted changes, checked again just before
   sweepDone(cx) {
-    for (const t of this.cards) {
+    for (const t of this.trees) {
       if (this.doneLeft(t) !== 0 || this.sweeping.has(t.key) || t.git?.dirty) continue;
       const root = t.git?.root, main = t.git?.common?.endsWith("/.git") ? t.git.common.slice(0, -5) : null;
       if (!root || !main || root === main || !root.startsWith(WT_ROOT())) continue;
@@ -1106,7 +1191,7 @@ export default class Board extends View {
 
   // A: to Archived (its tabs put away; they keep running and come back when they need you), or back out of it
   archive(task) {
-    setStage(task.key, task.stage === "archived" ? DEFAULT_STAGE : "archived");
+    setCardStage(task, task.stage === "archived" ? DEFAULT_STAGE : "archived");
   }
 
   ask(cx, task, what) {
@@ -1118,7 +1203,7 @@ export default class Board extends View {
     if (!t) return;
     const i = STAGES.findIndex(([k]) => k === t.stage);
     const n = Math.max(0, Math.min(STAGES.length - 1, i + by));
-    if (n !== i) { this.folded.delete(STAGES[n][0]); setStage(t.key, STAGES[n][0]); }
+    if (n !== i) { this.folded.delete(STAGES[n][0]); setCardStage(t, STAGES[n][0]); }
     cx.notify();
   }
 
@@ -1136,7 +1221,7 @@ export default class Board extends View {
 
   // the Linear column's cards ({key: "linear:<ID>", issue}): your issues waiting to start, minus those a worktree
   // already is (on any card, whatever the filters) and those just started
-  linearList(cards = this.cards) {
+  linearList(cards = this.trees) {
     const linked = new Set(cards.map((t) => issueOf(t.key, t.branch)?.id).filter(Boolean));
     return todoColumn(this.linear.issues, { linked, starting: shared(STARTING) ?? {}, now: Date.now() })
       .map((i) => ({ key: `linear:${i.identifier}`, issue: i }));
@@ -1152,10 +1237,11 @@ export default class Board extends View {
   columns() {
     const q = this.query.trim().toLowerCase();
     const has = (list) => !q || list.some((v) => String(v ?? "").toLowerCase().includes(q));
-    const hit = (t) => has([t.name, t.branch, t.project, t.space.name, ...t.agents.map((x) => cleanTitle(x.a.title)),
+    const hit = (t) => has([t.name, t.branch, t.project, t.space.name, ...t.tags, ...t.agents.map((x) => cleanTitle(x.a.title)),
       ...t.needs.map((x) => this.asks[x.a.address])]);
     const cards = this.cards;
-    const shown = cards.filter((t) => inScope(t.key) && (!this.filter || t.project === this.filter) && hit(t));
+    const shown = cards.filter((t) => inScope(t.sid) && (!this.filter || t.project === this.filter)
+      && (!this.tagFilter || t.tags.includes(this.tagFilter)) && hit(t));
     // in the order you dragged them to, the same as the sidebar's
     const order = shared(ORDER) ?? [];
     return this.linearCols().map(([k]) => (k === "linear"
@@ -1322,7 +1408,8 @@ export default class Board extends View {
     }
     if (!key || (!to && !near)) return;
     const end = !near && to ? this.columns()[this.linearCols().findIndex(([k]) => k === to)].filter((t) => t.key !== key).pop() : null;
-    if (to) setStage(key, to);
+    const moved = this.cards.find((t) => t.key === key);
+    if (to && moved) setCardStage(moved, to);
     const place = near ?? (end ? { key: end.key, after: true } : null);
     if (place) {
       const known = new Set([...spaces().map((s) => s.id), ...agents().map((a) => a.address)]);
@@ -1335,9 +1422,17 @@ export default class Board extends View {
   // what Merge (M) does: merge the card's pull request, or ship one
   landMove(t) { return t ? this.moves(t)[0] ?? null : null; }
 
+  // G: a card per worktree, or per session; the selection follows to the card of the same agent
+  flipUnit(cx) {
+    const t = this.cards.find((x) => x.key === this.sel);
+    setShared(UNIT, bySessions() ? "worktree" : "session");
+    if (t) this.sel = bySessions() ? t.main?.a.address ?? t.key : t.sid;
+    cx.notify();
+  }
+
   // P: the next project chip (all, then each project shown)
   nextProject(cx) {
-    const list = [null, ...[...new Set(this.cards.filter((t) => inScope(t.key)).map((t) => t.project))].sort()];
+    const list = [null, ...[...new Set(this.cards.filter((t) => inScope(t.sid)).map((t) => t.project))].sort()];
     this.filter = list[(list.indexOf(this.filter) + 1) % list.length];
     cx.notify();
   }
@@ -1365,9 +1460,11 @@ export default class Board extends View {
     else if (c === "peek") this.setPeek(cx, !this.peek);
     else if (c === "go" && t) this.goTo(cx, t);
     else if (c === "archive" && t) this.archive(t);
-    else if (c === "delete" && t) deleteWorktree(t.key);
-    else if (c === "stage" && t) openStagePicker(t.key, t.name, t.stage, false);
-    else if (c === "add-agent" && t) newAgent(t.key);
+    else if (c === "delete" && t) deleteWorktree(t.sid);
+    else if (c === "stage" && t) openStagePicker(t.sid, t.name, t.stage, false, { session: t.session });
+    else if (c === "add-agent" && t) newAgent(t.sid);
+    else if (c === "unit") this.flipUnit(cx);
+    else if (c === "tags" && t) openTagPicker(t.main?.a.address, t.name, false);
     else if (c === "scope") setShared(SCOPE, allSpaces() ? "repo" : "all");
     else if (c === "stage-next") this.moveStage(cx, t, 1);
     else if (c === "stage-prev") this.moveStage(cx, t, -1);
@@ -1411,16 +1508,16 @@ export default class Board extends View {
     if (this.confirm && (k === "n" || k === "escape")) { this.confirm = null; cx.notify(); cx.stop_propagation(); return; }
     if (m.shift && (k === "l" || k === "L" || k === "right")) this.moveStage(cx, t, 1);
     else if (m.shift && (k === "h" || k === "H" || k === "left")) this.moveStage(cx, t, -1);
-    else if (m.shift && (k === "n" || k === "N")) { if (t) newAgent(t.key); }
+    else if (m.shift && (k === "n" || k === "N")) { if (t) newAgent(t.sid); }
     else if (k === "j" || k === "down") this.step(cx, 0, 1);
     else if (k === "k" || k === "up") this.step(cx, 0, -1);
     else if (k === "h" || k === "left") this.step(cx, -1, 0);
     else if (k === "l" || k === "right") this.step(cx, 1, 0);
     else if (k === "0") this.toColumn(cx, "linear");
     else if (/^[1-9]$/.test(k)) this.toColumn(cx, STAGES[Number(k) - 1]?.[0]);
-    else if ((k === "backspace" || k === "delete") && t) deleteWorktree(t.key);
+    else if ((k === "backspace" || k === "delete") && t) deleteWorktree(t.sid);
     else if (k === "s" && li) openStagePicker(null, li.identifier, null, false, { only: ["todo", "in_progress"], issue: issueRef(li) });
-    else if (k === "s" && t) openStagePicker(t.key, t.name, t.stage, false);
+    else if (k === "s" && t) openStagePicker(t.sid, t.name, t.stage, false, { session: t.session });
     else if (k === "enter" && li) { if (!e.is_held) startIssue(issueRef(li), "in_progress"); } // a held ⏎ would start it
     else if (k === "enter" && t) this.goTo(cx, t);
     else if (k === "space") this.setPeek(cx, !this.peek);
@@ -1429,7 +1526,7 @@ export default class Board extends View {
     else if (k === "?" || (k === "/" && m.shift)) { this.help = !this.help; cx.notify(); }
     else if (k === "/") this.search.focus();
     else if (k === "a" && t) { this.archive(t); cx.notify(); }
-    else if (k === "u" && t) { setUnread(t.key, !isUnread(t.key)); cx.notify(); }
+    else if (k === "u" && t) { setUnread(t.sid, !isUnread(t.sid)); cx.notify(); }
     else if (k === "r") toggleAsks();
     else if (k === "y" && t && this.recommended(t)) { const [q, o] = this.recommended(t); this.answerer.answer(q, o, cx); }
     else if (k === "m" && this.landMove(t)) this.ask(cx, t, this.landMove(t));
@@ -1438,6 +1535,8 @@ export default class Board extends View {
     else if (k === "n" || k === "c") newAgent();
     else if (k === "v") setShared(SCOPE, allSpaces() ? "repo" : "all");
     else if (k === "p") this.nextProject(cx);
+    else if (k === "g") this.flipUnit(cx);
+    else if (k === "t" && t) openTagPicker(t.main?.a.address, t.name, false);
     else return;
     cx.stop_propagation();
   }
@@ -1455,6 +1554,7 @@ export default class Board extends View {
       ["N  C", "new agent, in a new worktree"], ["⇧N", "one more agent in this worktree"],
       ["M", "merge or ship the PR"], ["O", "open the PR in the browser"],
       ["/", "search"], ["V", "this repo / all"], ["P", "next project"],
+      ["G", "a card per worktree / per session"], ["T", "the session's tags"],
       ["Esc", "back out one step"], ["⌘E", "board ↔ the agent you were on"], ["⌘]  ⌘[", "next / previous agent"],
     ];
     return v_flex().id("keys").absolute().right(16).bottom(12).w(350).p(14).gap(5).rounded(10)
@@ -1483,6 +1583,7 @@ export default class Board extends View {
     if (this.part === "prs-settings") return this.prsSet.render(cx);
     if (this.part === "new") return this.summary ? this.summaryDialog() : this.newDialog();
     if (this.part === "stage") return this.stagePicker();
+    if (this.part === "tags") return this.tagPicker();
     if (this.part === "prlist") return this.prListView();
     if (this.part === "cleanup") return this.cleanupDialog();
     if (this.part === "board") return this.board(cx);
@@ -1523,6 +1624,46 @@ export default class Board extends View {
       .child(mono(10, color, label));
   }
 
+  // a tag on a card: its color, its name
+  tagPill(id, name, onClick) {
+    const { color } = tagInfo(name);
+    return h_flex().id(id).flex_none().h(18).px(6).gap(5).items_center().rounded(9).border(1).border_color(`${color}66`)
+      .bg(`${color}1f`).cursor_pointer().hover((st) => st.bg(`${color}33`))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); })
+      .child(div().w(6).h(6).rounded(3).bg(color))
+      .child(div().font_family(SANS).text_size(11).text_color(C.soft).child(name));
+  }
+
+  // the tags the shown cards have, to show only one's cards (a click again shows them all)
+  tagChips(cards) {
+    const used = new Set(cards.flatMap((t) => t.tags));
+    if (this.tagFilter && !used.has(this.tagFilter)) this.tagFilter = null;
+    const list = allTags().filter((t) => used.has(t.name));
+    if (!list.length) return [];
+    return [div().w(1).h(16).mx(4).bg(C.line2), ...list.map((t) => {
+      const on = this.tagFilter === t.name;
+      return h_flex().id(`tagf-${t.name}`).flex_none().gap(5).px(7).py(2).rounded(9).items_center().cursor_pointer().border(1)
+        .border_color(on ? t.color : `${t.color}44`).bg(on ? `${t.color}33` : "#00000000").hover((st) => st.bg(`${t.color}22`))
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click((_e, cx) => { this.tagFilter = on ? null : t.name; cx.notify(); })
+        .child(div().w(6).h(6).rounded(3).bg(t.color))
+        .child(div().font_family(SANS).text_size(11).text_color(on ? C.text : C.soft).child(t.name))
+        .child(mono(10, C.dim, String(cards.filter((c) => c.tags.includes(t.name)).length)));
+    })];
+  }
+
+  // Worktrees | Sessions: a card per worktree or per session (G)
+  unitSwitch() {
+    const seg = (on, label) => div().id(`unit-${label}`).px(8).py(2).rounded(4).cursor_pointer()
+      .bg(on ? C.raised : "#00000000").hover((st) => st.bg(C.hover))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { if (!on) this.flipUnit(cx); })
+      .child(div().font_family(SANS).text_size(12).text_color(on ? C.text : C.muted).child(label));
+    return h_flex().id("unit").flex_none().p(2).gap(2).rounded(6).border(1).border_color(C.line2).bg(C.main)
+      .child(seg(!bySessions(), "Worktrees")).child(seg(bySessions(), "Sessions")).child(div().px(4).child(mono(10, C.dim, "G")));
+  }
+
   stat(label, value, color, extra, win) {
     return v_flex().flex_1().min_w(0).px(12).py(9).rounded(8).border(1)
       .bg(win ? C.landBg : C.card).border_color(win ? C.landLine : C.line)
@@ -1548,7 +1689,7 @@ export default class Board extends View {
     return h_flex().id(`stage-${t.key}`).flex_none().h(20).px(6).gap(5).items_center().rounded(4).border(1)
       .border_color(`${color}55`).bg(`${color}14`).cursor_pointer().hover((st) => st.bg(`${color}2a`))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation()) // not the card's drag (see btn)
-      .on_click((_e, cx) => { cx.stop_propagation(); openStagePicker(t.key, t.name, t.stage, true); })
+      .on_click((_e, cx) => { cx.stop_propagation(); openStagePicker(t.sid, t.name, t.stage, true, { session: t.session }); })
       .child(div().w(7).h(7).rounded(4).bg(color))
       .child(div().font_family(SANS).text_size(11).text_color(C.soft).child(name))
       .child(div().text_size(9).text_color(C.dim).child("▾"));
@@ -1609,8 +1750,8 @@ export default class Board extends View {
     const nudge = this.nudge(t);
     const openPr = pr ? (el) => el.child(this.btn(`pr-${t.key}`, `PR #${pr.number} ↗`, "plain", (cx) => cx.spawn(async () => { await exec("open", [pr.url]); }))) : (el) => el;
     const subs = t.subs.map(subStatus);
-    const iss = issueOf(t.key, t.branch);
-    const unread = isUnread(t.key);
+    const iss = issueOf(t.sid, t.branch);
+    const unread = isUnread(t.sid);
     const others = t.prList.filter((p) => p.url !== pr?.url);
     const left = this.doneLeft(t);
     if (left !== null) facts.push(g?.dirty ? ["uncommitted: won't auto-delete", C.you] : [left ? `deletes in ${dur(left)}` : "deleting…", C.muted]);
@@ -1634,16 +1775,16 @@ export default class Board extends View {
         .when(!!blocked, (el) => el.child(this.btn(`answer-${t.key}`, "Answer", "you", (cx) => this.setFocus(cx, true, t))))
         .when(!!q, (el) => el.child(this.btn(`asks-${t.key}`, pickable(q) || q.form ? "Asks  R" : "Reply  R", blocked ? "plain" : "you", () => toggleAsks(true))))
         .child(this.btn(`go-${t.key}`, "Go to agent", "plain", (cx) => this.goTo(cx, t, addr)))
-        .child(this.btn(`add-${t.key}`, "+ Agent", "plain", () => newAgent(t.key)));
+        .child(this.btn(`add-${t.key}`, "+ Agent", "plain", () => newAgent(t.sid)));
     } else {
       const mv = t.stage === "archived" ? [] : this.moves(t);
       actions = h_flex().flex_wrap().gap(6)
         .children(mv.map((w) => this.btn(`${w}-${t.key}`, LABEL[w], "land", (cx) => this.ask(cx, t, w))))
         .when(true, openPr)
-        .when(!!nudge, (el) => el.child(this.btn(`nudge-${t.key}`, `→ ${stageInfo(nudge)[1]}`, "plain", () => setStage(t.key, nudge))))
+        .when(!!nudge, (el) => el.child(this.btn(`nudge-${t.key}`, `→ ${stageInfo(nudge)[1]}`, "plain", () => setCardStage(t, nudge))))
         .child(this.btn(`go-${t.key}`, t.agents.length ? "Open" : "Open terminal", "plain", (cx) => this.goTo(cx, t)))
-        .when(t.stage !== "done", (el) => el.child(this.btn(`add-${t.key}`, "+ Agent", "plain", () => newAgent(t.key))))
-        .when(t.stage === "done" && isWorktree(t.space), (el) => el.child(this.btn(`del-${t.key}`, "Delete now", "plain", () => deleteWorktree(t.key))));
+        .when(t.stage !== "done", (el) => el.child(this.btn(`add-${t.key}`, "+ Agent", "plain", () => newAgent(t.sid))))
+        .when(t.stage === "done" && !t.session && isWorktree(t.space), (el) => el.child(this.btn(`del-${t.key}`, "Delete now", "plain", () => deleteWorktree(t.key))));
     }
 
     // a flex row (stretching, unlike h_flex) so the status bar on the left runs the card's full height
@@ -1663,7 +1804,7 @@ export default class Board extends View {
       .when(this.dragCard === t.key && Boolean(this.dropCol || this.dropNear), (el) => el.opacity(0.45))
       .on_click((e, cx) => (e.click_count === 2 ? this.goTo(cx, t) : this.pick(cx, t.key, true)))
       .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.cancelDrag(); this.sel = t.key; cx.notify();
-        openStagePicker(t.key, t.name, t.stage, true, { menu: true, prs: t.prList }); })
+        openStagePicker(t.sid, t.name, t.stage, true, { menu: true, prs: t.prList, session: t.session, tagsOf: t.main?.a.address }); })
       .child(div().w(3).flex_none().bg(statusColor(unread ? "done" : t.status)))
       .child(v_flex().flex_1().min_w(0).px(11).py(9).gap(5)
       .child(h_flex().w_full().gap(6).items_center()
@@ -1678,6 +1819,10 @@ export default class Board extends View {
           .child(div().w(7).h(7).rounded(4).bg(C.land)).child(mono(10, C.land, "unread")))))
       // its links, on a row of their own so the stage button above always fits: the Linear issue, and in Planning the
       // plan its skill wrote, to read in the browser
+      // a session's worktree, and the tags (a worktree's card: every session's; a click picks its main session's)
+      .when(!!t.session || t.tags.length > 0, (el) => el.child(h_flex().w_full().flex_wrap().gap(5).items_center()
+        .when(!!t.session, (el) => el.child(mono(10, C.dim, `in ${trunc(t.worktree ?? "", 28)}`)))
+        .children(t.tags.map((n) => this.tagPill(`tag-${t.key}-${n}`, n, () => openTagPicker(t.main?.a.address, t.name, true))))))
       .when(!!iss || (t.stage === "todo" && !!g?.plan) || others.length > 0, (el) => el.child(h_flex().w_full().flex_wrap().gap(6).items_center()
         .when(!!iss, (el) => el.child(this.linkPill(`iss-${t.key}`, `↗ ${iss.id}`, REF_KINDS.linear[1],
           (cx) => cx.spawn(async () => { await exec("open", [iss.url]); }))))
@@ -1785,8 +1930,8 @@ export default class Board extends View {
     const rf = shared(REFOCUS) ?? 0;
     if (rf !== this.refocusAt) { this.refocusAt = rf; this.cancelDrag(); if (!this.focus) this.grab(cx); }
     const every = this.cards;
-    const cards = every.filter((t) => inScope(t.key));
-    const away = every.filter((t) => !inScope(t.key)).reduce((n, t) => n + t.needs.length, 0);
+    const cards = every.filter((t) => inScope(t.sid));
+    const away = every.filter((t) => !inScope(t.sid)).reduce((n, t) => n + t.needs.length, 0);
     if (this.filter && !cards.some((t) => t.project === this.filter)) this.filter = null;
     if (this.peek && !shared(PEEK)) this.peek = false;
     const lc = this.linearCols(), cols = this.columns();
@@ -1835,9 +1980,11 @@ export default class Board extends View {
         .child(this.filterChip(null, "all", cards.length))
         .children(projects.map((p) => this.filterChip(p, p, cards.filter((t) => t.project === p).length,
           cards.some((t) => t.project === p && t.needs.length))))))
+      .children(this.tagChips(cards))
       .when(leftover.length > 0, (el) => el.child(this.btn("leftover", `${plural(leftover.length, "leftover worktree")} · clean up`, "plain",
         () => openOverlay({ mod: MOD, kind: "dialog", width: 640, height: 480, props: { part: "cleanup", orphans: leftover } }))))
       .child(div().flex_1())
+      .child(this.unitSwitch())
       .child(h_flex().id("search").w(170).h(26).flex_none().px(8).gap(6).items_center().rounded(6).border(1)
         .border_color(this.searching ? C.accentDim : C.line2).bg(C.main)
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
@@ -2281,7 +2428,7 @@ export default class Board extends View {
   // another dialog takes over from this one (a Linear card's stage, the summary's E, the dialog's Esc back)
   async close() {
     if (this.handoff) return;
-    if (["stage", "new", "cleanup", "prs-settings", "prlist"].includes(this.part)) setShared(REFOCUS, Date.now());
+    if (["stage", "tags", "new", "cleanup", "prs-settings", "prlist"].includes(this.part)) setShared(REFOCUS, Date.now());
   }
 
   // ---- leftover worktrees -----------------------------------------------------------------------------------
@@ -2424,6 +2571,7 @@ export default class Board extends View {
     if (stage === "unread") { closeOverlay(p.overlay); setUnread(p.space, !isUnread(p.space)); return; }
     if (stage === "open") { closeOverlay(p.overlay); if (p.issue?.url) exec("open", [p.issue.url]); return; }
     if (stage === "prs") { this.handoff = true; closeOverlay(p.overlay); openPrList(p.title, p.prs ?? [], false); return; }
+    if (stage === "tags") { this.handoff = true; closeOverlay(p.overlay); openTagPicker(p.tagsOf, p.title, false); return; }
     if (p.issue) {
       if (!stage || stage === "delete") return;
       this.handoff = true;
@@ -2433,7 +2581,7 @@ export default class Board extends View {
     }
     closeOverlay(p.overlay);
     if (stage === "delete") deleteWorktree(p.space);
-    else if (stage !== p.stage) setStage(p.space, stage);
+    else if (stage !== p.stage) { if (p.session) setSessionStage(p.session, stage); else setStage(p.space, stage); }
   }
 
   stagePicker() {
@@ -2453,6 +2601,7 @@ export default class Board extends View {
         else if (k === "u" && acts.includes("unread")) this.choose("unread");
         else if (k === "o" && acts.includes("open")) this.choose("open");
         else if (k === "p" && acts.includes("prs")) this.choose("prs");
+        else if (k === "t" && acts.includes("tags")) this.choose("tags");
         else if ((k === "backspace" || k === "delete") && p.deletable) this.choose("delete");
         else if (k === "escape") closeOverlay(p.overlay);
         else return;
@@ -2463,6 +2612,7 @@ export default class Board extends View {
         const acts = p.actions;
         const look = (a) => (a === "open" ? ["↗", "Open in Linear", "O", REF_KINDS.linear[1]]
           : a === "prs" ? ["⇅", `Pull requests (${p.prs?.length ?? 0})`, "P", C.accent]
+          : a === "tags" ? ["#", "Tags…", "T", C.accent]
           : isUnread(p.space) ? ["○", "Mark as read", "U", C.land] : ["●", "Mark as unread", "U", C.land]);
         return el
           .children(acts.map((a, i) => {
@@ -2492,6 +2642,77 @@ export default class Board extends View {
           .child(div().w(8).flex_none().text_size(11).text_color(C.red).child("×"))
           .child(div().flex_1().font_family(SANS).text_size(13).text_color(C.red).child("Delete worktree…"))
           .child(mono(11, C.dim, "⌫"))));
+  }
+
+  // ---- tags ---------------------------------------------------------------------------------------------------
+
+  // a session's tags: each one on or off (it stays open), and a new one typed at the bottom; written on its terminal
+  initTags(cx) {
+    this.at = 0;
+    this.pending = null; // the tags just written, shown until the terminal's label says so
+    this.h = cx.focus_handle();
+    this.h.focus();
+    cx.timer.after(300, () => this.h.focus());
+    this.newTag = InputState.new({ placeholder: "New tag ⏎" });
+    this.typing = false; // typing a new tag: the keys are the input's
+    this.newTag.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
+    this.newTag.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
+    this.newTag.on("submit", (_e, cx) => {
+      const n = addTag(this.newTag.value());
+      if (n && !this.sessionTags().includes(n)) this.writeTags(cx, [...this.sessionTags(), n]);
+      this.newTag.set_value("");
+      this.h.focus();
+      cx.notify();
+    });
+  }
+
+  sessionTags() {
+    const now = tagsOfSession((props() ?? {}).address);
+    if (this.pending && formatTags(now) === formatTags(this.pending)) this.pending = null;
+    return this.pending ?? now;
+  }
+
+  writeTags(cx, list) {
+    this.pending = list;
+    cx.spawn(async (cx) => { await setSessionTags((props() ?? {}).address, list); cx.notify(); });
+  }
+
+  tagPicker() {
+    const p = props() ?? {};
+    const list = allTags(), on = this.sessionTags();
+    const flip = (cx, name) => this.writeTags(cx, toggleTag(on, name));
+    return v_flex().id("tags").size_full().p(5).bg("#18181b").track_focus(this.h)
+      .on_key_down((e, cx) => {
+        const k = e.key;
+        if (this.typing) {
+          if (k !== "escape") return;
+          this.newTag.set_value("");
+          this.h.focus();
+        }
+        else if (/^[1-9]$/.test(k) && list[Number(k) - 1]) flip(cx, list[Number(k) - 1].name);
+        else if (k === "down" || k === "j") this.at = Math.min(list.length - 1, this.at + 1);
+        else if (k === "up" || k === "k") this.at = Math.max(0, this.at - 1);
+        else if ((k === "enter" || k === "space") && list[this.at]) flip(cx, list[this.at].name);
+        else if (k === "n" || k === "/") this.newTag.focus();
+        else if (k === "escape") closeOverlay(p.overlay);
+        else return;
+        cx.stop_propagation();
+        cx.notify();
+      })
+      .child(div().px(9).pt(6).pb(6).truncate().child(mono(10, C.dim, `TAGS · ${trunc(String(p.title ?? ""), 26)}`)))
+      .child(v_flex().id("tag-rows").flex_1().min_h(0).overflow_y_scrollbar()
+        .when(!list.length, (el) => el.child(div().px(9).py(6).child(mono(11, C.dim, "no tags yet: type one below"))))
+        .children(list.map((t, i) => h_flex().id(`tg-${i}`).h(30).flex_none().px(9).gap(10).items_center().rounded(6)
+          .bg(i === this.at ? C.raised : "#00000000").cursor_pointer().hover((st) => st.bg(C.raised))
+          .on_click((_e, cx) => { this.at = i; flip(cx, t.name); cx.notify(); })
+          .child(div().w(8).h(8).flex_none().rounded(4).bg(t.color))
+          .child(div().flex_1().min_w(0).truncate().font_family(SANS).text_size(13).text_color(C.text).child(t.name))
+          .child(mono(11, C.accent, on.includes(t.name) ? "✓" : ""))
+          .child(mono(11, C.dim, i < 9 ? String(i + 1) : "")))))
+      .child(div().h(1).mx(6).my(4).bg(C.line2))
+      .child(h_flex().h(30).flex_none().px(9).gap(8).items_center()
+        .child(mono(11, C.dim, "+"))
+        .child(Input.new(this.newTag).flex_1().min_w(0).h(26).font_family(SANS).text_size(12).text_color(C.text)));
   }
 
   // ---- New agent ------------------------------------------------------------------------------------------------

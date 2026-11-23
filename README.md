@@ -60,6 +60,23 @@ goes to its main agent, not a sub-agent that agent started.
   with an issue the message is optional. Where a column's skill isn't installed, the summary says so and won't start.
   Without the file, New agent and the Linear column work with no skill. The older `{ "orchestrate": "<skill>" }`
   still works.
+- **Sessions** (G, or Worktrees | Sessions over the board): a card per session instead of per worktree, in the same
+  stage columns. A session is an agent you started; the agents and sub-agents it started in the same worktree stay on
+  its card. A session has its own stage, its worktree's until you move it (dragging it, S, ⇧←→), kept on its terminal
+  as the core label `board.stage`. Its Done removes nothing; only a worktree's does.
+- **Tags**: your own labels on a session (Instagram, Security, Ops...), any number of them, kept on its terminal as
+  the core label `board.tags` (`hc label <t> board.tags=Ops,Security`), so every Herdr client sees them. A card shows
+  them (a worktree's, every session's), the chips over the board show one tag's cards, and a click on a tag, T, or the
+  card's menu (Tags…) picks them (a worktree's card: its main session's), with a new one typed at the bottom. Besides
+  the ones you make, tags come from `board.json`:
+
+  ```json
+  { "tags": ["Ops", { "name": "Security", "color": "#22a99a" }], "tagLabel": "hbl.group", "tagList": "hbl.groups" }
+  ```
+
+  - `tags`: tags to offer.
+  - `tagLabel`: a label the board copies once into a session it never tagged (an agent's group, say).
+  - `tagList`: a shared value another mod keeps (names, or `{name}`), whose names are offered as tags.
 - **Plans**: a card in Planning shows `📄 Plan ready` when its worktree has `tmp/<ID>/plan/report.md` (or
   `report.html`), as a planning skill may write. A click opens it in the browser, the Markdown as a readable page.
 - **Asks** (⌘⇧A): every question your agents ask, answered from the card or the panel without opening the terminal.
