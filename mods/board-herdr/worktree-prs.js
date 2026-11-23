@@ -36,3 +36,21 @@ export function mergePrs(own, lists) {
   }
   return out;
 }
+
+// a gh that herdr stopped for taking too long: the machine's link to GitHub dropped the connection (it comes back by
+// itself), not a mistake to show. The footer says so only once it happens STALL_AFTER times in a row on one machine
+export const STALL_AFTER = 3;
+export const timedOut = (e) => /took longer than/i.test(String(e?.message ?? e ?? ""));
+
+// timeouts in a row per machine ("" is this one): one more when gh timed out, none once it answers
+export function ghStall(stalls, on, slow) {
+  const key = on ?? "", next = { ...stalls };
+  if (slow) next[key] = (next[key] ?? 0) + 1;
+  else delete next[key];
+  return next;
+}
+
+export function stallProblem(stalls) {
+  const [key, n] = Object.entries(stalls).find(([, n]) => n >= STALL_AFTER) ?? [];
+  return key === undefined ? null : `gh${key ? ` on ${key}` : ""}: GitHub didn't answer ${n} times in a row, pull requests may be out of date`;
+}

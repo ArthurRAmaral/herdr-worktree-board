@@ -59,7 +59,7 @@ import { PrsFeed, PRS, PR_ASK, PR_DRAFTS } from "./prs-data.js";
 import { PrsBoard, PrsSettings, PRS_SHOWN } from "./prs.js";
 import { lanes } from "./prs-rules.js";
 import { planPage } from "./md-html.js";
-import { checks, parseClonePrs, mergePrs } from "./worktree-prs.js";
+import { checks, parseClonePrs, mergePrs, timedOut, ghStall, stallProblem } from "./worktree-prs.js";
 import { mainAgent, addNew, moveKey, toFront, byOrder, seq } from "./nav-order.js";
 import { readBoardConfig, firstMessage, moveInLinear, todoColumn, canDrop, issueFromBranch, startedState } from "./linear-rules.js";
 
@@ -742,6 +742,7 @@ export default class Board extends View {
     this.clonePrs = {}; // a clone under a worktree's repos/ -> its open pull requests from its branches
     this.cloneAt = {}; // and when they were last asked
     this.offGithub = new Set(); // repos (git common dir) whose remotes aren't on GitHub
+    this.stalls = {}; // machine -> gh calls in a row that GitHub didn't answer in time
     this.merged = []; // closedAt (ms) of my pull requests merged in the last 7 days
     this.problem = null; // the last git or gh error
     this.linearProblem = null; // the last Linear move that failed: "<ID> not moved in Linear: <reason>"
@@ -841,6 +842,7 @@ export default class Board extends View {
         // waits out its timeout), and its cards keep what was last read
         const down = new Set(machines().filter((m) => m.name && m.layout === "unavailable").map((m) => m.name));
         const cut = (on, e) => on && /unreachable|cannot reach/i.test(String(e?.message ?? e)) && down.add(on);
+        const heard = (on, slow) => { this.stalls = ghStall(this.stalls, on, slow); };
         for (const [dir, on] of where) {
           if (on && down.has(on)) continue;
           try {
@@ -871,8 +873,9 @@ export default class Board extends View {
           this.cloneAt[c] = Date.now();
           try {
             const r = await exec("sh", ["-c", CLONE_PRS, "sh", c], { on, timeout: 30000 });
+            heard(on, false);
             if (r.code === 0) this.clonePrs[c] = parseClonePrs(r.stdout);
-          } catch (e) { cut(on, e); }
+          } catch (e) { if (!cut(on, e) && timedOut(e)) heard(on, true); }
         }
         // one pull request lookup per branch that isn't the default one
         const branches = new Map();
@@ -886,6 +889,7 @@ export default class Board extends View {
           this.prAt[key] = Date.now();
           try {
             const r = await exec("gh", ["pr", "view", g.branch, "--json", "number,url,title,state,isDraft,mergeStateStatus,statusCheckRollup"], { cwd: g.root, on });
+            heard(on, false);
             if (r.code === 0) {
               const p = JSON.parse(r.stdout);
               this.prs[key] = { number: p.number, url: p.url, title: p.title, state: p.state, draft: p.isDraft, merge: p.mergeStateStatus, checks: checks(p.statusCheckRollup) };
@@ -894,9 +898,13 @@ export default class Board extends View {
             else if (/known GitHub host|no git remotes/i.test(r.stderr ?? "")) { this.prs[key] = null; this.offGithub.add(g.common); }
             // which machine's gh said it: another machine's login may not reach a repo this one does
             else problem = `gh${on ? ` on ${on}` : ""}: ${lastLine(r.stderr)}`;
-          } catch (e) { if (!cut(on, e)) problem = `gh${on ? ` on ${on}` : ""}: ${String(e.message ?? e)}`; }
+          } catch (e) {
+            // GitHub not answering in time keeps the card's last pull request; tried again when it's next due
+            if (timedOut(e)) heard(on, true);
+            else if (!cut(on, e)) problem = `gh${on ? ` on ${on}` : ""}: ${String(e.message ?? e)}`;
+          }
         }
-        this.problem = problem;
+        this.problem = problem ?? stallProblem(this.stalls);
         this.offline = [...down].sort();
       } finally {
         this.reading = false;

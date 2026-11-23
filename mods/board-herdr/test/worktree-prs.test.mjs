@@ -1,7 +1,7 @@
 // A worktree's pull requests (worktree-prs.js), run with `node --test test/` from the mod's folder.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseClonePrs, mergePrs, repoOf } from "../worktree-prs.js";
+import { parseClonePrs, mergePrs, repoOf, timedOut, ghStall, stallProblem, STALL_AFTER } from "../worktree-prs.js";
 
 const pr = (n, repo = "acme/api", over = {}) => ({ number: n, url: `https://github.com/${repo}/pull/${n}`, title: `PR ${n}`, ...over });
 
@@ -36,4 +36,31 @@ test("mergePrs: the worktree's own first, then the rest, each once", () => {
 
 test("mergePrs: none", () => {
   assert.deepEqual(mergePrs(null, []), []);
+});
+
+test("timedOut: herdr's own timeout, not gh's errors", () => {
+  assert.equal(timedOut(new Error("`herdr.exec`: gh took longer than 30 s on box and was stopped")), true);
+  assert.equal(timedOut(new Error("could not resolve to a Repository")), false);
+  assert.equal(timedOut(null), false);
+});
+
+test("ghStall: counts timeouts in a row per machine, and an answer starts over", () => {
+  let s = {};
+  s = ghStall(s, "box", true);
+  s = ghStall(s, "box", true);
+  s = ghStall(s, null, true);
+  assert.deepEqual(s, { box: 2, "": 1 });
+  s = ghStall(s, "box", false);
+  assert.deepEqual(s, { "": 1 });
+});
+
+test("stallProblem: quiet until a machine has STALL_AFTER timeouts in a row", () => {
+  let s = {};
+  for (let i = 1; i < STALL_AFTER; i++) s = ghStall(s, "box", true);
+  assert.equal(stallProblem(s), null);
+  s = ghStall(s, "box", true);
+  assert.match(stallProblem(s), /^gh on box: GitHub didn't answer \d+ times in a row/);
+  let here = {};
+  for (let i = 0; i < STALL_AFTER; i++) here = ghStall(here, null, true);
+  assert.match(stallProblem(here) ?? "", /^gh: GitHub didn't answer/);
 });
