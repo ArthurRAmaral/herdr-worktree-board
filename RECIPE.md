@@ -71,7 +71,9 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
     to fit its options (longest option label × 6.6 + 100 px, or the question's length ÷ 3, up to 480 px). When they
     don't fit, only the columns row pans sideways (the numbers and chips keep the view's width): drag the background
     (past 4 px, with the grabbing cursor), a trackpad's sideways scroll, or the wheel with Shift; a thin bar at the
-    bottom shows where you are, and moving the selection pans to its column. Each column scrolls on its own. The column
+    bottom shows where you are, and moving the selection pans to its column. When the row's width changes (the side
+    opens, closes or is resized) it pans to centre the selected card's column, and the card scrolls into view in it;
+    a click on a card cut at the edge pans just enough to show it whole. Each column scrolls on its own. The column
     the sidebar marked has a border and a tint in its color.
   - **A card**: a 3 px left bar in the worktree's status color; on another machine, a 2 px dashed outline (`#9a99a0`),
     like a box around it; selected (by a click or the keys), a solid 2 px outline in the accent and a tinted background
@@ -504,8 +506,9 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   repo's.
 - `↓ ↑ ← →`, `1–9`, `S` (the picker) then `Esc`, then `↓` again moves the selection: the keyboard came back.
 - `⇧→` on a card moves it to the next stage; the sidebar group and the stage button follow; after a reload it stays.
-- Opening the agent beside the board (a click on a card, or Space) narrows the board: the columns pan sideways by
-  dragging the background, the numbers and chips don't; another card's click shows its agent there. Minimize on its
+- Opening the agent beside the board (a click on a card, or Space) narrows the board and the selected card stays in
+  view, its column centred (pick one in the rightmost column to see it); the columns pan sideways by dragging the
+  background, the numbers and chips don't; another card's click shows its agent there. Minimize on its
   bar closes it and the arrows move the selection again.
 - With the side open, a click on another agent in the sidebar shows it once, full screen, with the keyboard; Minimize
   there brings the board back.

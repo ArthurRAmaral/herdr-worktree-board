@@ -36,7 +36,7 @@
 // worktree mod puts them, and, only with LINEAR_API_KEY set in your shell, asks api.linear.app for your open issues.
 // A click on a card (or an agent on it) shows that agent's live terminal beside the board, in the layout's hidden
 // "focus-term" block; the board stays whole and clickable, so another click shows another agent (Esc or Space
-// closes it). Focus (F) opens the same block on who needs you, with the keyboard, so the question can be answered
+// closes it). The side narrows the board: the columns pan so the selected card stays in view, centred. Focus (F) opens the same block on who needs you, with the keyboard, so the question can be answered
 // in place. "agent-head" is the bar over an agent, beside the board or in its place: its Minimize gives the board back
 // the screen and the keyboard. Going to an agent's whole screen closes the side first, so one agent shows once.
 // Asks (github.com/sachin-philip/herdr-agent-ask, fitted here): the sidebar copy runs its engine (asks-engine.js), which
@@ -891,6 +891,9 @@ export default class Board extends View {
     this.linear = { issues: [], error: null, at: 0 }; // the Linear column's last good read, and why the last one failed
     this.panX = 0; // how far the columns are scrolled sideways (px): a drag on the background, the wheel, the trackpad
     this.pan = null; // a drag on the background: {x, from, moved}
+    // the selected card brought into view on the next draw, when the columns' widths are known: "reveal" (whole, the
+    // least move) after a click, "center" when the board's width changed (the side opened, closed or was resized)
+    this.toSel = null;
     this.folded = new Set(["archived"]); // columns drawn as just their header
     this.refocusAt = shared(REFOCUS) ?? 0;
     this.query = ""; // /: cards whose name, branch, project, agents or question have it
@@ -1348,6 +1351,7 @@ export default class Board extends View {
     const x = this.focus ? t?.needs[0] ?? t?.main : t?.main;
     if (x && (open || this.focus || this.peek)) this.peekAt(cx, x.a.address);
     else if (t && !t.issue && !t.agents.length && (open || this.focus || this.peek)) this.peekSpace(cx, t);
+    if (open) this.toSel ??= "reveal";
     cx.notify();
   }
 
@@ -1432,6 +1436,17 @@ export default class Board extends View {
     if (x == null) return;
     if (x < this.panX) this.panX = x;
     else if (x + w > this.panX + view) this.panX = Math.min(this.panMax ?? 0, x + w - view);
+  }
+
+  // the selected card in view: its column scrolled sideways (centred, or just whole) and the card within its column
+  bringSel(lc, by, how) {
+    const c = lc.findIndex(([k]) => !this.folded.has(k) && by(k)?.some((t) => t.key === this.sel));
+    if (c < 0) return;
+    if (how === "center") {
+      const mid = this.colX[c] + this.colWs[c] / 2 - (this.colsW ?? 0) / 2;
+      this.panX = Math.max(0, Math.min(this.panMax ?? 0, Math.round(mid)));
+    } else this.reveal(c);
+    this.scroll[lc[c][0]].scroll_to_item(by(lc[c][0]).findIndex((t) => t.key === this.sel));
   }
 
   panTo(cx, x) {
@@ -1776,6 +1791,7 @@ export default class Board extends View {
         cx.stop_propagation();
         if (e.click_count === 2) { this.goTo(cx, t, a.address); return; }
         this.sel = t.key;
+        this.toSel ??= "reveal";
         this.peekAt(cx, a.address);
       })
       .child(div().w(12).flex_none().flex().justify_center().child(statusIcon(a.status, 7)))
@@ -2125,6 +2141,7 @@ export default class Board extends View {
     const contentW = widths.reduce((a, b) => a + b, 0) + 12 * (lc.length - 1), view = this.colsW ?? 0;
     this.panMax = Math.max(0, contentW - view);
     this.panX = Math.min(this.panX, this.panMax);
+    if (this.toSel) { this.bringSel(lc, by, this.toSel); this.toSel = null; }
     return v_flex().id("board").relative().size_full().bg(C.main).px(16).pt(14).pb(10).gap(12)
       .track_focus(this.h).on_key_down((e, cx) => this.key(e, cx))
       .on_mouse_down("left", () => this.h.focus())
@@ -2134,7 +2151,7 @@ export default class Board extends View {
       .when(this.offline.length > 0, (el) => el.child(mono(11, C.muted, `${this.offline.join(", ")} offline · its cards show the last read`)))
       .child(chips)
       .child(div().id("cols").relative().w_full().flex_1().min_h(0).overflow_hidden()
-        .on_size_change((size, cx) => { if (size.width !== this.colsW) { this.colsW = size.width; cx.notify(); } })
+        .on_size_change((size, cx) => { if (size.width !== this.colsW) { this.colsW = size.width; this.toSel = "center"; cx.notify(); } })
         // sideways: a trackpad's or a tilted wheel's horizontal scroll, or the wheel with Shift
         .on_scroll_wheel((e, cx) => {
           const dx = Math.abs(e.delta.x) > Math.abs(e.delta.y) ? e.delta.x : e.modifiers.shift ? e.delta.y : 0;

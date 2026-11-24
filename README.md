@@ -31,7 +31,7 @@ goes to its main agent, not a sub-agent that agent started.
 - **Drag**: a card to another column changes its stage; within a column, it changes its place. Drag the board's
   background to scroll it sideways, as in Linear.
 - **An agent beside the board**: a click on a card shows its agent's terminal at the right, and the board stays
-  whole and clickable, so another click shows another agent; a card with only terminals shows those. The bar over an
+  whole and clickable, panned so the card you picked stays in view, so another click shows another agent; a card with only terminals shows those. The bar over an
   agent, beside the board or in its place,
   has **Minimize**, which gives the board back the screen and the keyboard.
 - **Machines**: with Herdr's ssh machines, the board and the sidebar filter by machine, and New agent asks where the
