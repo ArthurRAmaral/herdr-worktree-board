@@ -1376,8 +1376,13 @@ export default class Board extends View {
     }
     setUnread(t.key, false);
     setShared(SHOWN, null);
-    run("space.select", { id: t.key });
+    // the tab block first: while the side's agent block still shows the last card's agent, the shown space goes back
+    // to that agent's, and the first click showed the last card's tab; checked again after this draw for that reason
     run("layout.select", { stack: "focus-body", child: "focus-tab" });
+    run("space.select", { id: t.key });
+    cx.timer.after(60, () => {
+      if (activeSpace()?.id !== t.key && findNode(layout(), "focus-body")?.active === "focus-tab") run("space.select", { id: t.key });
+    });
     this.grab(cx);
     cx.notify();
   }
