@@ -28,7 +28,8 @@
 // Keyboard, like Linear's: ↑↓/jk within a column, ←→/hl across columns, 0 the Linear column, 1-9 a stage, S the stage,
 // ⇧←→ the stage before or after, ⏎ opens the worktree's agent, Space peeks at it beside the board, N a new worktree,
 // ⇧N one more agent in this one, / searches, ? lists every key; ⌘E (keys.json, board-herdr.toggle) goes from an agent
-// to the board and back.
+// to the board; on the board it shows the selected card's agent beside it with the keyboard in it, to type, and hides
+// it again (from that agent too).
 // Data: spaces() and agents(); terminals() for the sub-agents; git in each worktree's folder for its repo, branch,
 // commits ahead of the default branch, uncommitted files and +added −removed; gh for the branch's pull request and
 // checks, and for what you merged this week. Merge PR runs `gh pr merge`, Ship PR runs `git push -u origin HEAD && gh
@@ -566,7 +567,7 @@ function openStagePicker(space, title, stage, pointer, { only, issue, menu, prs,
   const deletable = !issue && Boolean(spaces().find((s) => s.id === space && removable(s)));
   // the actions on top: Mark as unread / read or Open in Linear, a worktree's pull requests when it has several, its
   // labels, and End agents (those that can come back) or Restore (those ended)
-  const actions = menu ? [issue ? (issue.url ? "open" : null) : "unread", prs?.length > 1 ? "prs" : null, issue ? null : "labels",
+  const actions = menu ? [issue ? (issue.url ? "open" : null) : "unread", prs?.length > 1 ? "prs" : null, issue ? null : "labels", issue ? null : "rename",
     end ? "park" : null, restore ? "restore" : null].filter(Boolean) : [];
   openOverlay({ mod: MOD, props: { part: "stage", space, title, stage, deletable, only, issue, actions, end, restore,
     prs: actions.includes("prs") ? prs : null },
@@ -677,6 +678,11 @@ function openPark(spaceId, mode, offer) {
   const n = mode === "end" ? parkable(w).filter((a) => a.app).length : parkedCount((shared(PARKED) ?? {})[spaceId]);
   if (!n && offer) return;
   openOverlay({ mod: MOD, kind: "dialog", width: 460, height: 250, props: { part: "park", space: spaceId, name: w.name, mode } });
+}
+
+// a worktree's title: the name given to its space (it wins over every other), empty for the one the board finds again
+function openRename(spaceId, name, pointer) {
+  openOverlay({ mod: MOD, kind: pointer ? "popup" : "dialog", width: 360, height: 112, props: { part: "rename", space: spaceId, name } });
 }
 
 // a worktree's labels: a field to type one (an existing one, or a new one), the list to turn them on and off
@@ -800,6 +806,7 @@ export default class Board extends View {
     if (this.part === "prlist") { this.at = 0; this.h = cx.focus_handle(); this.h.focus(); cx.timer.after(300, () => this.h.focus()); return; }
     if (this.part === "park") { this.run = null; this.h = cx.focus_handle(); this.h.focus(); cx.timer.after(300, () => this.h.focus()); return; }
     if (this.part === "labels") { this.initLabels(cx); return; }
+    if (this.part === "rename") { this.initRename(cx); return; }
     if (this.part === "prs") {
       this.prsUi = new PrsBoard({ agentFor: worktreeOn, settings: openPrsSettings, refocused: () => shared(REFOCUS) ?? 0,
         openSpace: (id) => { const w = worktrees().find((x) => x.key === id); if (w) goToWorktree(w); } });
@@ -851,7 +858,7 @@ export default class Board extends View {
           else if (c === "asks-open") { openBoard(null); toggleAsks(true); } // a question's toast
           else if (c === "asks-recheck") this.engine.recheck(); // read every agent's last turn again
           else if (c.startsWith("go-")) goToAgent(c.slice(3)); // board-herdr.go-t7: what a click on an agent does
-          // ⌘E from an agent: the board (which takes the keyboard); from the board, the board's copy goes back
+          // ⌘E from an agent: the board (which takes the keyboard); on the board, the board's copy shows or hides the side
           else if (c === "toggle" && shownView() !== "board") openBoard(shared(COL)?.kind ?? null);
           cx.notify();
         }
@@ -1367,8 +1374,8 @@ export default class Board extends View {
   }
 
   // a worktree without agents: its terminals beside the board, as its space arranges them (the side's agent block
-  // shows only agents), the keyboard staying on the board
-  peekSpace(cx, t) {
+  // shows only agents), the keyboard staying on the board, or (type, ⌘E) in its tab's focused terminal
+  peekSpace(cx, t, type) {
     if (!this.focus && !this.peek) {
       this.peek = true;
       setShared(PEEK, true);
@@ -1382,8 +1389,13 @@ export default class Board extends View {
     run("space.select", { id: t.key });
     cx.timer.after(60, () => {
       if (activeSpace()?.id !== t.key && findNode(layout(), "focus-body")?.active === "focus-tab") run("space.select", { id: t.key });
+      if (!type) return;
+      const tab = spaces().find((s) => s.id === t.key)?.tabs?.find((x) => x.active)?.id;
+      const mine = panes().filter((p) => p.tab === tab && p.terminal);
+      const p = mine.find((x) => x.focused) ?? mine[0];
+      if (p) run("pane.focus", { pane: p.pane });
     });
-    this.grab(cx);
+    if (!type) this.grab(cx);
     cx.notify();
   }
 
@@ -1501,16 +1513,17 @@ export default class Board extends View {
     cx.notify();
   }
 
-  // Space: the selected worktree's agent beside the board, following the selection; the keyboard stays here
-  setPeek(cx, on) {
+  // Space: the selected worktree's agent beside the board, following the selection; the keyboard stays here, or (type,
+  // ⌘E) goes to that agent, to type a prompt
+  setPeek(cx, on, type) {
     if (this.focus) return;
     this.peek = on;
     setShared(PEEK, on);
     const t = this.cards.find((x) => x.key === this.sel);
     if (on) {
       run("layout.show", { id: "focus-term" });
-      if (t?.main) this.show(cx, t.main.a.address);
-      else if (t && !t.issue && !t.agents.length) this.peekSpace(cx, t);
+      if (t?.main) { if (type) this.answerIn(t.main.a.address); else this.show(cx, t.main.a.address); }
+      else if (t && !t.issue && !t.agents.length) this.peekSpace(cx, t, type);
     } else run("layout.hide", { id: "focus-term" });
     cx.notify();
   }
@@ -1550,15 +1563,14 @@ export default class Board extends View {
     cx.notify();
   }
 
-  // ⌘E on the board: back out of Focus or the search, else to the agent you came from (or the selected worktree)
+  // ⌘E on the board: back out of Focus or the search, else the side as Space does (the selected worktree's agent
+  // beside the board) but with the keyboard in that agent, to type a prompt; again (from the agent too) it closes, the
+  // board taking the keyboard back
   toggle(cx) {
     if (this.focus) { this.setFocus(cx, false); return; }
     if (this.searching) { this.grab(cx); return; }
-    const f = focused()?.terminal;
-    const t = this.cards.find((x) => x.key === this.sel);
-    if (this.peek) this.setPeek(cx, false);
-    if (f && agents().some((a) => a.address === f)) goToAgent(f);
-    else if (t) goToWorktree(t);
+    if (this.peek) { this.setPeek(cx, false); this.grab(cx); }
+    else this.setPeek(cx, true, true);
   }
 
   command(c, cx) {
@@ -1639,6 +1651,7 @@ export default class Board extends View {
     else if (k === "a" && t) { this.archive(t); cx.notify(); }
     else if (k === "u" && t) { setUnread(t.key, !isUnread(t.key)); cx.notify(); }
     else if (k === "t" && t) openLabels(t.key, t.name, false);
+    else if (m.shift && (k === "r" || k === "R")) { if (t && !t.issue) openRename(t.key, t.name, false); }
     else if (k === "g") { setShared(GROUP, !shared(GROUP)); cx.notify(); }
     else if (k === "r") toggleAsks();
     else if (k === "y" && t && this.recommended(t)) { const [q, o] = this.recommended(t); this.answerer.answer(q, o, cx); }
@@ -1657,7 +1670,7 @@ export default class Board extends View {
     const KEYS = [
       ["↑ ↓  j k", "move within a column"], ["← →  h l", "move across columns"], ["1 – 9", "first card of a stage"],
       ["0", "the Linear column"],
-      ["S  drag", "change the stage, or the order"], ["⇧← ⇧→", "stage before / after"], ["A", "archive / unarchive"], ["U  right-click", "mark unread / the card's menu"], ["T", "labels"], ["G", "group by label"], ["⌫", "delete the worktree"],
+      ["S  drag", "change the stage, or the order"], ["⇧← ⇧→", "stage before / after"], ["A", "archive / unarchive"], ["U  right-click", "mark unread / the card's menu"], ["T", "labels"], ["⇧R  right-click", "rename"], ["G", "group by label"], ["⌫", "delete the worktree"],
       ["Click", "its agent beside the board"], ["⏎  double-click", "open the worktree's agent"],
       ["⏎ on an issue", "start it"], ["Space", "show / hide the side"],
       ["F", "Focus: answer what needs you"],
@@ -1665,7 +1678,7 @@ export default class Board extends View {
       ["N  C", "new agent, in a new worktree"], ["⇧N", "one more agent in this worktree"],
       ["M", "merge or ship the PR"], ["O", "open the PR in the browser"],
       ["/", "search"], ["V", "this repo / all"], ["P", "next project"],
-      ["Esc", "back out one step"], ["⌘E", "board ↔ the agent you were on"], ["⌘]  ⌘[", "next / previous agent"],
+      ["Esc", "back out one step"], ["⌘E", "the agent beside the board, to type / hide it"], ["⌘]  ⌘[", "next / previous agent"],
     ];
     return v_flex().id("keys").absolute().right(16).bottom(12).w(350).p(14).gap(5).rounded(10)
       .bg("#18181b").border(1).border_color(C.line2).shadow_lg()
@@ -1696,6 +1709,7 @@ export default class Board extends View {
     if (this.part === "prlist") return this.prListView();
     if (this.part === "park") return this.parkDialog();
     if (this.part === "labels") return this.labelsView();
+    if (this.part === "rename") return this.renameView();
     if (this.part === "cleanup") return this.cleanupDialog();
     if (this.part === "board") return this.board(cx);
     return div().child(`board-herdr: unknown part ${this.part}`);
@@ -1881,7 +1895,7 @@ export default class Board extends View {
       // another machine, a dashed outline, like a box around it
       .bg(sel ? (asking ? C.selAsk : C.selBg) : asking ? C.youCard : C.card)
       .border(sel || t.machine ? 2 : 1).border_color(sel ? C.accent : t.machine ? C.remote : C.line)
-      .when(!!t.machine && !sel, (el) => el.border_dashed())
+      .when(!!t.machine, (el) => el.border_dashed())
       .cursor_pointer().hover((s) => s.bg(sel ? (asking ? C.selAsk : C.selBg) : C.hover))
       // a click shows its agent beside the board, a double-click goes to it; a drag to another column moves its stage
       // a drag over another card lands above or below it (a line shows where), in its column
@@ -2544,7 +2558,7 @@ export default class Board extends View {
   // another dialog takes over from this one (a Linear card's stage, the summary's E, the dialog's Esc back)
   async close() {
     if (this.handoff) return;
-    if (["stage", "new", "cleanup", "prs-settings", "prlist", "park", "labels"].includes(this.part)) setShared(REFOCUS, Date.now());
+    if (["stage", "new", "cleanup", "prs-settings", "prlist", "park", "labels", "rename"].includes(this.part)) setShared(REFOCUS, Date.now());
   }
 
   // ---- leftover worktrees -----------------------------------------------------------------------------------
@@ -2768,6 +2782,27 @@ export default class Board extends View {
         .when(!list.length && !create, (el) => el.child(div().px(8).py(6).child(mono(11, C.dim, "Type a label: pesquisa, feature, bug…")))));
   }
 
+  // a worktree's title: ⏎ names its space (empty: the title the board finds by itself again), Esc leaves it
+  initRename(cx) {
+    const p = props() ?? {};
+    this.rin = InputState.new({ placeholder: "Empty: the automatic title" });
+    this.rin.set_value(String(p.name ?? ""));
+    this.rin.on("submit", () => {
+      run("space.rename", { id: p.space, name: this.rin.value().trim().replace(/\s+/g, " ") });
+      closeOverlay(p.overlay);
+    });
+    this.rin.focus();
+    cx.timer.after(300, () => this.rin.focus());
+  }
+
+  renameView() {
+    const p = props() ?? {};
+    return v_flex().id("rename").size_full().p(8).gap(6).bg("#18181b")
+      .on_key_down((e, cx) => { if (e.key === "escape") { closeOverlay(p.overlay); cx.stop_propagation(); } })
+      .child(div().px(2).child(mono(10, C.dim, "RENAME · ⏎ saves · empty: automatic · esc")))
+      .child(Input.new(this.rin).h(32).px(8).rounded(6).border(1).border_color(C.accentDim).bg(C.main).font_family(SANS).text_size(13).text_color(C.text));
+  }
+
   // the stages it offers: a Linear card's (only), else every one
   stages() {
     const only = (props() ?? {}).only;
@@ -2780,6 +2815,7 @@ export default class Board extends View {
     if (stage === "unread") { closeOverlay(p.overlay); setUnread(p.space, !isUnread(p.space)); return; }
     if (stage === "open") { closeOverlay(p.overlay); if (p.issue?.url) exec("open", [p.issue.url]); return; }
     if (stage === "prs") { this.handoff = true; closeOverlay(p.overlay); openPrList(p.title, p.prs ?? [], false); return; }
+    if (stage === "rename") { this.handoff = true; closeOverlay(p.overlay); openRename(p.space, p.title, false); return; }
     if (stage === "labels") { this.handoff = true; closeOverlay(p.overlay); openLabels(p.space, p.title, false); return; }
     if (stage === "park" || stage === "restore") { this.handoff = true; closeOverlay(p.overlay); openPark(p.space, stage === "park" ? "end" : "restore"); return; }
     if (p.issue) {
@@ -2812,6 +2848,7 @@ export default class Board extends View {
         else if (k === "o" && acts.includes("open")) this.choose("open");
         else if (k === "p" && acts.includes("prs")) this.choose("prs");
         else if (k === "t" && acts.includes("labels")) this.choose("labels");
+        else if (k === "n" && acts.includes("rename")) this.choose("rename");
         else if (k === "e" && acts.includes("park")) this.choose("park");
         else if (k === "r" && acts.includes("restore")) this.choose("restore");
         else if ((k === "backspace" || k === "delete") && p.deletable) this.choose("delete");
@@ -2825,6 +2862,7 @@ export default class Board extends View {
         const look = (a) => (a === "open" ? ["↗", "Open in Linear", "O", REF_KINDS.linear[1]]
           : a === "prs" ? ["⇅", `Pull requests (${p.prs?.length ?? 0})`, "P", C.accent]
           : a === "labels" ? ["#", "Labels…", "T", C.accent]
+          : a === "rename" ? ["✎", "Rename…", "N", C.accent]
           : a === "park" ? ["■", `End agents (${p.end})`, "E", C.muted]
           : a === "restore" ? ["↺", `Restore agents (${p.restore})`, "R", C.land]
           : isUnread(p.space) ? ["○", "Mark as read", "U", C.land] : ["●", "Mark as unread", "U", C.land]);
@@ -3489,7 +3527,7 @@ export default class Board extends View {
         .on_click(() => minimize(side))
         .child(icon("minimize", 12, C.muted))
         .child(div().font_family(SANS).text_size(12).text_color(C.soft).child("Minimize"))
-        .when(!side, (el) => el.child(mono(10, C.dim, "⌘E"))));
+        .child(mono(10, C.dim, "⌘E")));
   }
 
   bottom() {

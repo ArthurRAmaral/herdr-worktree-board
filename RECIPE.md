@@ -52,7 +52,7 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   px-radius cards, gap 6, border `#1e1e20`, focused `#625187`.
   - **The agent bar** (`#101012`, a bottom line): the agent's status icon, what it says it's doing (12 px), its
     worktree (10 px mono dim), and at the right `Minimize` (22 px, bordered, a chevron-over-a-line icon,
-    `minimize.svg`) with `⌘E` in the main stack; in the side, no key. Without an agent, the tab's name.
+    `minimize.svg`) with `⌘E`. Without an agent, the tab's name.
   - **Numbers**, five tiles: `LANDED TODAY` (green, with 7 bars of your merged PRs this week, today's solid),
     `NEEDS YOU`, `WORKING` (with `+ N of M sub-agents`), `IN REVIEW`, `OPEN PRS`.
   - **Next move** banner, when someone waits: `<worktree> asks: "<question>"`, project · agent · `waiting 4m`,
@@ -76,7 +76,7 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
     a click on a card cut at the edge pans just enough to show it whole. Each column scrolls on its own. The column
     the sidebar marked has a border and a tint in its color.
   - **A card**: a 3 px left bar in the worktree's status color; on another machine, a 2 px dashed outline (`#9a99a0`),
-    like a box around it; selected (by a click or the keys), a solid 2 px outline in the accent and a tinted background
+    like a box around it; selected (by a click or the keys), a 2 px outline in the accent, dashed when it's on another machine, and a tinted background
     (`#262139`, `#2d2615` for one waiting for you) that hovering keeps (the Linear column's cards too); the project chip (one of 8 colors, from its name), the
     branch, a machine tag (the machine icon and its name, such as `devbox`, or `devbox · offline` dimmed) when it's on
     another machine, the
@@ -86,7 +86,7 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
     popup takes its content's height, so the list has a max height, not `flex_1`, which would leave it empty)
     and, in Planning, `📄 Plan ready` (`#53cf91`, opens the plan); marked unread, a green bar and `● unread` by the
     title. A right-click opens its menu at the pointer: `● Mark as unread  U` (or `○ Mark as read`), `⇅ Pull requests
-    (3)  P` when it has several, `# Labels…  T`, `■ End agents (n)  E` when it has agents that can come back,
+    (3)  P` when it has several, `# Labels…  T`, `✎ Rename…  N`, `■ End agents (n)  E` when it has agents that can come back,
     `↺ Restore agents (n)  R` when it has ones ended, the stages, `× Delete worktree…  ⌫` (for a worktree under any machine's
     `~/.herdr/worktrees`); a Linear card's: `↗ Open in Linear  O` and Planning / In progress; the agents
     counted (`2 waiting · 1 working`) and, with sub-agents, `· 3 sub-agents` counted too; up to 4 agent lines (status
@@ -196,6 +196,9 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   trip, and one after another the first read of a big fleet took minutes.
 - **Unread** (`boardh.unread`, space → when): your mark, set from the menu or `U`, cleared when any of its agents is
   shown (beside the board, in its place, or to answer).
+- **Rename**: `⇧R` on the board or the menu's `✎ Rename…` opens a field with the card's title; ⏎ names the worktree's
+  space (`space.rename`), which wins over every other title (New agent's, the agent's, the branch) and shows in the
+  sidebar too; saved empty, the board finds the title by itself again. Esc leaves it.
 - **Labels** (pure rules in `labels-rules.js`; `boardh.labels`, space → labels): your own words for a worktree
   (pesquisa, feature, bug…), none built in. `T` or the menu's `# Labels…` opens a field over the list of every label in
   use (the most used first): typing filters it, ⏎ turns the first one on or off, or makes the one typed when no label
@@ -323,7 +326,7 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   - Making and shipping: N/C New agent, ⇧N an agent in this worktree, M merge or ship the PR, O open the PR.
   - Filtering: / search (name, branch, project, agents, question; ↓ or ⏎ back to the cards), V repo/all, P next project.
   - ? key list. Esc backs out one step: the key list, the search, the peek, Focus, the marked column, the selection.
-- **Keys anywhere in the layout** (keys.json): ⌘E board ↔ the agent you were on (also out of Focus); ⌘N New agent;
+- **Keys anywhere in the layout** (keys.json): ⌘E from an agent's whole screen, the board; on the board, shows the selected card's agent beside it as Space does but with the keyboard in it, to type a prompt (a card without agents: its tab's focused terminal), and again, also typing in it, hides it (and out of Focus); ⌘N New agent;
   ⌘W close the tab, or remove the worktree on its last tab; ⌘⇧A the Asks panel; ⌘⇧B the board. From any other layout,
   ⌘⇧B switches to this one.
 - Clicking a space in the sidebar's Spaces shows its terminal (in All scope); a click on an agent or worktree row goes
@@ -538,4 +541,4 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   same number as `Meus PRs · N`), and ⌘⇧G again goes back to the board; the sidebar's PRs count equals Precisa da minha
   revisão + Comentários a resolver + Draft: revisar para liberar.
 - Removing a team repo in the gear (or in `prs.json`) takes its unrequested PRs out of `Precisa do meu time` within 2 min.
-- ⌘⇧B from another layout opens this one on the board; ⌘E goes from the board to the agent you were on and back.
+- ⌘⇧B from another layout opens this one on the board; ⌘E on the board opens the side with the cursor in the agent (typing goes there), and again closes it and the arrows move the selection; from an agent's whole screen, the board.

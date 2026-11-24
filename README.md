@@ -24,6 +24,8 @@ goes to its main agent, not a sub-agent that agent started.
   of its agents; `U` does it too), its pull requests when it has several, its labels, End agents / Restore agents, its
   stage, and Delete worktree (also on another machine; Herdr's own Remove worktree asks first). A Linear card's menu
   opens it in Linear or starts it.
+- **Rename**: `⇧R` (or the card's menu) gives a card your own title; saved empty, it goes back to the automatic one
+  (the issue's, the first message's, what the agent says it's doing, the branch).
 - **Labels**: your own words for a worktree (pesquisa, feature, bug…): `T` opens a field where typing a new one makes
   it. Cards show them; the filter row filters by them, and `G` groups each column's cards by label.
 - **Archive without the load**: archiving a worktree offers to end its Claude Code and OpenCode agents, to free the
@@ -104,7 +106,7 @@ By hand: copy `layouts/board-herdr.json` to `~/.config/herdr-app/layouts/` and `
 | Key | Where | What |
 |---|---|---|
 | ⌘⇧B | anywhere | the board (from another layout, switches to this one) |
-| ⌘E | this layout | board ↔ the agent you were on |
+| ⌘E | this layout | on the board, show the agent beside it, ready to type a prompt, or hide it (also while typing in it); from an agent's whole screen, the board |
 | ⌘N | this layout | New agent |
 | ⌘W | this layout | close the tab; on a worktree's last tab, remove the worktree |
 | ⌘⇧A | this layout | the Asks panel |
