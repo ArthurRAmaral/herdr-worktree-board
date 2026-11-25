@@ -64,7 +64,7 @@ import { checks, parseClonePrs, mergePrs, timedOut, ghStall, stallProblem, parse
 import { mainAgent, addNew, moveKey, toFront, byOrder, seq } from "./nav-order.js";
 import { appOf, resumeArgv, pickOpencodeSession, shellLine, parseClaudeSession, parkedCount } from "./park-rules.js";
 import { placesOn, placeOf, repoPlace } from "./where-rules.js";
-import { normLabel, labelsOf, toggleLabel, allLabels, suggest, groupByLabel, dropGone } from "./labels-rules.js";
+import { normLabel, labelsOf, toggleLabel, allLabels, suggest, groupByLabel, dropGone, catalog, remember, removeLabel } from "./labels-rules.js";
 import { readBoardConfig, firstMessage, moveInLinear, todoColumn, canDrop, issueFromBranch, startedState } from "./linear-rules.js";
 
 const MOD = "board-herdr";
@@ -139,6 +139,7 @@ const SHOWN = "boardh.shown"; // shared: the agent the board last showed beside 
 const PARKED = "boardh.parked"; // shared: space id -> {at, agents: [{address, app, session, cwd, argv, title}]}: agents
 // ended to free the machine, to bring back where they left off
 const LABELS = "boardh.labels"; // shared: space id -> its labels, your words for it (pesquisa, feature, bug…)
+const LABEL_SET = "boardh.labelSet"; // shared: every label you made, kept with no card on it until you delete it
 const GROUP = "boardh.group"; // shared: true: each column's cards under their first label
 const FEATURES = "boardh.features"; // shared: board.json's features still being built ({prs}), read by the sidebar's copy
 const PEEK = "boardh.peek"; // shared: Space shows the selected agent beside the board (the top bar then keeps the board)
@@ -703,6 +704,8 @@ function openLabels(spaceId, name, pointer) {
   openOverlay({ mod: MOD, kind: pointer ? "popup" : "dialog", width: 300, height: 320, props: { part: "labels", space: spaceId, name } });
 }
 const labelMap = () => shared(LABELS) ?? {};
+// the labels to offer: the ones you made (at first, the ones on cards), the used first
+const labelSet = () => catalog(shared(LABEL_SET) ?? allLabels(labelMap()), labelMap());
 
 // Minimize on the bar over an agent: beside the board (Peek or Focus), the side closes; in the board's place, the board
 // comes back; either way the board takes the keyboard, so another card or agent is a click or a key away
@@ -1197,12 +1200,14 @@ export default class Board extends View {
     const repos = Object.fromEntries(cards.filter((t) => t.git).map((t) => [t.key, { common: t.git.common, name: t.git.project }]));
     if (JSON.stringify(repos) !== JSON.stringify(shared(REPOS) ?? {})) setShared(REPOS, repos);
     // a space that no longer exists drops its issue link (no spaces at all: Herdr is still starting, keep them)
+    // (one on a machine that isn't ready, reconnecting or offline, keeps its own: its spaces just aren't listed now)
+    const ms = machines(), ready = (m) => ms.find((x) => (x.name ?? null) === m)?.layout === "ready";
     const kept = shared(SPACE_ISSUES) ?? {}, live = new Set(spaces().map((s) => s.id));
-    const alive = Object.fromEntries(Object.entries(kept).filter(([id]) => live.has(id)));
+    const alive = dropGone(kept, live, ready);
     if (live.size && Object.keys(alive).length !== Object.keys(kept).length) setShared(SPACE_ISSUES, alive);
     // and its labels, and its ended agents
     for (const key of [LABELS, PARKED]) {
-      const m = shared(key) ?? {}, left = dropGone(m, live);
+      const m = shared(key) ?? {}, left = dropGone(m, live, ready);
       if (live.size && Object.keys(left).length !== Object.keys(m).length) setShared(key, left);
     }
     const branches = cards.filter((t) => t.git?.branch).map((t) => ({ space: t.key, project: t.git.project, branch: t.git.branch }));
@@ -2781,7 +2786,7 @@ export default class Board extends View {
     this.lin = InputState.new({ placeholder: "Find or add a label" });
     this.lin.on("change", (_e, cx) => { this.lq = this.lin.value(); cx.notify(); });
     this.lin.on("submit", (_e, cx) => {
-      const { list, create } = suggest(allLabels(labelMap()), this.lq);
+      const { list, create } = suggest(labelSet(), this.lq);
       const pick = create ?? list[0];
       if (pick) this.toggleLabel(pick, cx);
     });
@@ -2790,7 +2795,9 @@ export default class Board extends View {
   }
 
   toggleLabel(label, cx) {
+    setShared(LABEL_SET, remember(labelSet(), label));
     setShared(LABELS, toggleLabel(labelMap(), (props() ?? {}).space, label));
+    this.delArm = null;
     this.lin.set_value("");
     this.lq = "";
     cx.notify();
@@ -2799,13 +2806,28 @@ export default class Board extends View {
   labelsView() {
     const p = props() ?? {};
     const map = labelMap(), mine = labelsOf(map, p.space);
-    const { list, create } = suggest(allLabels(map), this.lq);
+    const { list, create } = suggest(labelSet(), this.lq);
+    // × deletes a label (from the list and every card): the first click asks, the second deletes
+    const del = (id, l) => {
+      const armed = this.delArm === l;
+      return div().id(`${id}-del`).flex_none().px(5).rounded(4).cursor_pointer().hover((st) => st.bg(C.line2))
+        .on_click((_e, cx) => {
+          cx.stop_propagation();
+          if (!armed) { this.delArm = l; cx.notify(); return; }
+          setShared(LABELS, removeLabel(labelMap(), l));
+          setShared(LABEL_SET, labelSet().filter((x) => x !== l));
+          this.delArm = null;
+          cx.notify();
+        })
+        .child(mono(11, armed ? C.red : C.dim, armed ? "delete?" : "×"));
+    };
     const row = (id, l, on, text) => h_flex().id(id).w_full().flex_none().h(28).px(8).gap(8).items_center().rounded(6).cursor_pointer()
       .hover((st) => st.bg(C.raised))
       .on_click((_e, cx) => this.toggleLabel(l, cx))
       .child(div().w(12).flex_none().child(mono(11, C.accent, on ? "✓" : "")))
       .child(div().w(8).h(8).flex_none().rounded(4).bg(chipColor(l)[0]))
-      .child(div().flex_1().min_w(0).truncate().font_family(SANS).text_size(13).text_color(C.text).child(text ?? l));
+      .child(div().flex_1().min_w(0).truncate().font_family(SANS).text_size(13).text_color(C.text).child(text ?? l))
+      .when(!text, (el) => el.child(del(id, l)));
     return v_flex().id("labels").size_full().p(6).gap(4).bg("#18181b")
       .on_key_down((e, cx) => { if (e.key === "escape") { closeOverlay(p.overlay); cx.stop_propagation(); } })
       .child(div().px(4).pt(2).truncate().child(mono(10, C.dim, `LABELS · ${trunc(String(p.name ?? ""), 26)}`)))

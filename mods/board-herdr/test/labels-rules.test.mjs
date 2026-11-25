@@ -1,7 +1,7 @@
 // A worktree's labels (labels-rules.js), run with `node --test test/` from the mod's folder.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normLabel, labelsOf, toggleLabel, allLabels, suggest, groupByLabel, dropGone } from "../labels-rules.js";
+import { normLabel, labelsOf, toggleLabel, allLabels, suggest, groupByLabel, dropGone, catalog, remember, removeLabel } from "../labels-rules.js";
 
 test("normLabel: trimmed, one space, lower case, at most 24 characters", () => {
   assert.equal(normLabel("  Bug  Fix "), "bug fix");
@@ -45,4 +45,25 @@ test("groupByLabel: a column's cards under their first label, once each, then th
 
 test("dropGone: a space that no longer exists drops its labels", () => {
   assert.deepEqual(dropGone({ a: ["bug"], b: ["x"] }, new Set(["a"])), { a: ["bug"] });
+});
+
+test("dropGone: a space on a machine that isn't ready (reconnecting) keeps its labels", () => {
+  const map = { a: ["bug"], "box/s1": ["root"], "box/s2": ["x"] };
+  assert.deepEqual(dropGone(map, new Set(["a"]), (m) => m !== "box"), map);
+  assert.deepEqual(dropGone(map, new Set(["a", "box/s1"]), () => true), { a: ["bug"], "box/s1": ["root"] });
+});
+
+test("catalog: every saved label stays, the used first (most used), then the unused by name", () => {
+  assert.deepEqual(catalog(["zeta", "bug", "alpha"], { a: ["bug"], b: ["bug", "new"] }), ["bug", "new", "alpha", "zeta"]);
+  assert.deepEqual(catalog(undefined, {}), []);
+});
+
+test("remember: a label joins the catalog once, normalized", () => {
+  assert.deepEqual(remember(["bug"], "  Feature  "), ["bug", "feature"]);
+  assert.deepEqual(remember(["bug"], "BUG"), ["bug"]);
+  assert.deepEqual(remember(undefined, ""), []);
+});
+
+test("removeLabel: off every card, and a card left without any drops out", () => {
+  assert.deepEqual(removeLabel({ a: ["bug", "x"], b: ["bug"] }, "bug"), { a: ["x"] });
 });

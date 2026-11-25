@@ -204,14 +204,16 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   space (`space.rename`), which wins over every other title (New agent's, the agent's, the branch) and shows in the
   sidebar too; saved empty, the board finds the title by itself again. Esc leaves it.
 - **Labels** (pure rules in `labels-rules.js`; `boardh.labels`, space → labels): your own words for a worktree
-  (pesquisa, feature, bug…), none built in. `T` or the menu's `# Labels…` opens a field over the list of every label in
-  use (the most used first): typing filters it, ⏎ turns the first one on or off, or makes the one typed when no label
+  (pesquisa, feature, bug…), none built in. `T` or the menu's `# Labels…` opens a field over every label you made (`boardh.labelSet`, kept with no card on it; at first the
+  ones on cards): the used first (most used), then the rest by name; a row's `×` deletes the label, from the list and
+  every card (the first click shows `delete?`, the second deletes): typing filters it, ⏎ turns the first one on or off, or makes the one typed when no label
   is exactly it; a click turns any on or off. One spelling each: trimmed, single spaces, lower case, at most 24
   characters. A card shows them as round pills in its links row, colored from the name as a project chip; the filter
   row lists them with their counts after the projects, and a click there or on a card's pill shows only that label's
   cards (again: all); `/` finds them too. `G` or `▤ group` (`boardh.group`) puts each column's cards under their first
   label (`# BUG` over the first of each group, in the card's own slot so scrolling to a card still lands on it), the
-  ones without one last (`NO LABEL`). A space that is gone drops its labels.
+  ones without one last (`NO LABEL`). A space that is gone drops its labels (one on another machine only while that machine is ready: reconnecting,
+  its spaces aren't listed, and they aren't gone); the label itself stays in the list.
 - **Ending agents, bringing them back** (pure rules in `park-rules.js`; `boardh.parked`, space → `{at, agents:
   [{address, app, session, cwd, argv, title}]}`): archiving a worktree with agents that can come back (Claude Code,
   OpenCode, on its panes or started by them) opens `End the agents of …?`; `End n agents  ⏎` frees the machine. For

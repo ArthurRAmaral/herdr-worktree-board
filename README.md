@@ -30,7 +30,7 @@ goes to its main agent, not a sub-agent that agent started.
 - **Rename**: `⇧R` (or the card's menu) gives a card your own title; saved empty, it goes back to the automatic one
   (the issue's, the first message's, what the agent says it's doing, the branch).
 - **Labels**: your own words for a worktree (pesquisa, feature, bug…): `T` opens a field where typing a new one makes
-  it. Cards show them; the filter row filters by them, and `G` groups each column's cards by label.
+  it; labels stay in the list until you delete one (its `×`). Cards show them; the filter row filters by them, and `G` groups each column's cards by label.
 - **Archive without the load**: archiving a worktree offers to end its Claude Code and OpenCode agents, to free the
   machine. Restore brings each one back in its terminal, in the same conversation (`claude --resume`, `opencode -s`).
 - **Drag**: a card to another column changes its stage; within a column, it changes its place. Drag the board's

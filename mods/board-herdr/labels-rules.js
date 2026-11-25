@@ -38,7 +38,26 @@ export function groupByLabel(cards, map) {
   return none.length ? [...groups, [null, none]] : groups;
 }
 
-// a space that no longer exists drops its labels
-export function dropGone(map, live) {
-  return Object.fromEntries(Object.entries(map ?? {}).filter(([id]) => live.has(id)));
+// a space that no longer exists drops its labels; one on another machine ("box/sp…") only when that machine is
+// ready: while it reconnects its spaces aren't listed, and they aren't gone
+export function dropGone(map, live, ready = () => true) {
+  const machine = (id) => (id.includes("/") ? id.slice(0, id.indexOf("/")) : null);
+  return Object.fromEntries(Object.entries(map ?? {}).filter(([id]) => live.has(id) || !ready(machine(id))));
+}
+
+// the labels you made: kept until you delete one, even with no card on it; the used first (allLabels' order), then the rest by name
+export function catalog(saved, map) {
+  const used = allLabels(map);
+  return [...used, ...[...new Set(saved ?? [])].filter((l) => !used.includes(l)).sort((a, b) => a.localeCompare(b))];
+}
+
+// a label made (or put on a card) joins the catalog
+export function remember(saved, label) {
+  const l = normLabel(label), list = saved ?? [];
+  return !l || list.includes(l) ? list : [...list, l];
+}
+
+// a label deleted: off every card
+export function removeLabel(map, label) {
+  return Object.fromEntries(Object.entries(map ?? {}).map(([id, ls]) => [id, ls.filter((x) => x !== label)]).filter(([, ls]) => ls.length));
 }
