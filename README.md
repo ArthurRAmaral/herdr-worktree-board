@@ -24,6 +24,9 @@ goes to its main agent, not a sub-agent that agent started.
   of its agents; `U` does it too), its pull requests when it has several, its labels, End agents / Restore agents, its
   stage, and Delete worktree (also on another machine; Herdr's own Remove worktree asks first). A Linear card's menu
   opens it in Linear or starts it.
+- **New agent** (⌘N): pick the machine, then one of its Herdr spaces (a repo once, or a folder outside git), then a
+  new worktree or an existing one of that repo. It opens on the last start's choice, not on where you are.
+  `board.json`'s `linearRepo` makes every Linear card start in that repo, on whichever machine has it open.
 - **Rename**: `⇧R` (or the card's menu) gives a card your own title; saved empty, it goes back to the automatic one
   (the issue's, the first message's, what the agent says it's doing, the branch).
 - **Labels**: your own words for a worktree (pesquisa, feature, bug…): `T` opens a field where typing a new one makes
@@ -106,7 +109,7 @@ By hand: copy `layouts/board-herdr.json` to `~/.config/herdr-app/layouts/` and `
 | Key | Where | What |
 |---|---|---|
 | ⌘⇧B | anywhere | the board (from another layout, switches to this one) |
-| ⌘E | this layout | on the board, show the agent beside it, ready to type a prompt, or hide it (also while typing in it); from an agent's whole screen, the board |
+| ⌘E | this layout | the keyboard between the board and an agent, opening and closing nothing: the agent beside the board when it's open, else the selected card's on the whole screen, and back |
 | ⌘N | this layout | New agent |
 | ⌘W | this layout | close the tab; on a worktree's last tab, remove the worktree |
 | ⌘⇧A | this layout | the Asks panel |

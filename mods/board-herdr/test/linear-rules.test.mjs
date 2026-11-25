@@ -5,7 +5,7 @@ import * as L from "../linear-rules.js";
 
 test("readBoardConfig: legacy orchestrate key", () => {
   assert.deepEqual(L.readBoardConfig({ orchestrate: "orch" }),
-    { skills: ["orch"], stageSkills: { in_progress: "orch" }, issueArg: [], skillFlags: {}, features: { prs: false } });
+    { skills: ["orch"], stageSkills: { in_progress: "orch" }, issueArg: [], skillFlags: {}, features: { prs: false }, linearRepo: null });
 });
 
 test("readBoardConfig: drops bad names and reads all keys", () => {
@@ -19,8 +19,13 @@ test("readBoardConfig: drops bad names and reads all keys", () => {
   assert.deepEqual(cfg.skillFlags, { "plan-skill": "--sync-repos" });
 });
 
+test("readBoardConfig: linearRepo, the repo a Linear issue starts in, a plain name only", () => {
+  assert.equal(L.readBoardConfig({ linearRepo: "web-app" }).linearRepo, "web-app");
+  assert.equal(L.readBoardConfig({ linearRepo: "../x" }).linearRepo, null);
+});
+
 test("readBoardConfig: null gives empty lists and maps", () => {
-  assert.deepEqual(L.readBoardConfig(null), { skills: [], stageSkills: {}, issueArg: [], skillFlags: {}, features: { prs: false } });
+  assert.deepEqual(L.readBoardConfig(null), { skills: [], stageSkills: {}, issueArg: [], skillFlags: {}, features: { prs: false }, linearRepo: null });
 });
 
 test("issueFromBranch finds a known team's ID", () => {

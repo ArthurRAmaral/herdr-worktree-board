@@ -8,7 +8,7 @@ const mapOf = (v, ok) => Object.fromEntries(Object.entries(v && typeof v === "ob
   .filter(([k, val]) => typeof val === "string" && ok(k, val)));
 
 // board.json read into skills (the picker's list), a skill per stage, skills that take the issue ID, a skill's flags,
-// and the features still being built, each off unless board.json says `true` ({"features": {"prs": true}}: the PRs
+// the repo Linear issues start in, and the features still being built, each off unless board.json says `true` ({"features": {"prs": true}}: the PRs
 // view); the old {orchestrate: "x"} still reads as x, started in progress
 export function readBoardConfig(json) {
   const j = json && typeof json === "object" ? json : {};
@@ -18,6 +18,8 @@ export function readBoardConfig(json) {
     issueArg: names(j.issueArg),
     skillFlags: mapOf(j.skillFlags, (k) => NAME.test(k)),
     features: { prs: j.features?.prs === true },
+    // the repo a Linear issue starts in (its folder's name), on whichever machine it's open; null: the last start's
+    linearRepo: typeof j.linearRepo === "string" && NAME.test(j.linearRepo) ? j.linearRepo : null,
   };
   if (typeof j.orchestrate === "string" && NAME.test(j.orchestrate) && !cfg.skills.length) {
     cfg.skills = [j.orchestrate];

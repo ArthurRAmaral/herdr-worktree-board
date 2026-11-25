@@ -119,12 +119,16 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
 - **Bottom bar**: right-aligned, the last git or gh problem in red, `devbox offline` (muted, a dim dot) while a machine
   can't be reached, `read 11:57`, the clock.
 - **Dialogs**, all `#18181b`:
-  - **New agent** (540×770): `AGENT` (Claude Code and OpenCode as 52 px cards with icon, command and a radio; `not
+  - **New agent** (540×900; ⌘N opens it on the space and the New / Existing choice of the last start, wherever you
+    are, where-rules.js): `AGENT` (Claude Code and OpenCode as 52 px cards with icon, command and a radio; `not
     installed` dims one); `WHERE` (with spaces on more than one machine, a machine picker at the label's right: `This
     Mac` and each machine; picking one prefers a space there of the same repo, a main checkout first, and asks that
-    machine for its agents, the skill and the repo; `no space on <machine> to start from` when it has none; then `New
-    worktree` with `repo · from main · ~/.herdr/worktrees/<repo>/<branch>`, or `In
-    this worktree`); for a new worktree `BRANCH` (mono input, `empty: <the branch it will get>`, `on the board: <the
+    machine for its agents, the skill and the repo; `no space on <machine> to start from` when it has none; then the machine's
+    Herdr spaces as wrapping chips, a repo once (`⎇ name`, with its number of worktrees) and each space outside git
+    (`▢ name`), git ones first, by name; then for a repo `New worktree` with `repo · from main ·
+    ~/.herdr/worktrees/<repo>/<branch>`, or `Existing worktree` and under it the repo's worktrees there (the main
+    checkout first, then the latest used; ✓ the picked one, its card title and stage), one more agent in the one
+    picked; outside git only `In this space`; + Agent on a card keeps that worktree, without the chips); for a new worktree `BRANCH` (mono input, `empty: <the branch it will get>`, `on the board: <the
     title it will get>`) and `STAGE` (8 chips); `CONTEXT` (one input; your Linear issues drop down as you type; each
     reference a removable chip colored by kind: Linear `#8b93f8`, PR `#53cf91`, Slack `#e88cc8`, link `#6fb3f2`, note
     `#8a898e`); when `board.json` names skills installed on that machine (below), `SKILL · RUNS IN CLAUDE CODE` with
@@ -326,12 +330,15 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   - Making and shipping: N/C New agent, ⇧N an agent in this worktree, M merge or ship the PR, O open the PR.
   - Filtering: / search (name, branch, project, agents, question; ↓ or ⏎ back to the cards), V repo/all, P next project.
   - ? key list. Esc backs out one step: the key list, the search, the peek, Focus, the marked column, the selection.
-- **Keys anywhere in the layout** (keys.json): ⌘E from an agent's whole screen, the board; on the board, shows the selected card's agent beside it as Space does but with the keyboard in it, to type a prompt (a card without agents: its tab's focused terminal), and again, also typing in it, hides it (and out of Focus); ⌘N New agent;
+- **Keys anywhere in the layout** (keys.json): ⌘E moves only the keyboard, opening and closing nothing: from an agent's whole screen to the board; on the board with the side open, to the agent (or terminals) beside it and back; with it closed, to the selected card's agent or terminals on the whole screen (no card: the agent last focused); ⌘N New agent;
   ⌘W close the tab, or remove the worktree on its last tab; ⌘⇧A the Asks panel; ⌘⇧B the board. From any other layout,
   ⌘⇧B switches to this one.
 - Clicking a space in the sidebar's Spaces shows its terminal (in All scope); a click on an agent or worktree row goes
   to its agent (hide `focus-term`, agent.focus, pane.focus, the `work` child). The sidebar's agent order is what ⌘] / ⌘[ follow.
   Right-click any worktree or agent row: the stage picker at the pointer.
+- **Linear repo** (`board.json`'s `linearRepo`, a repo folder's name): a Linear card's start always goes to that
+  repo, on the machine of the last start when it's open there, else this computer, else any machine that has it
+  open (its main checkout's folder); without it, the last start's repo.
 - **Features still being built** (`board.json`'s `features`, each off unless it is `true`): `prs`, the PRs view. The
   sidebar's copy reads `board.json` at start and every 30 s into `boardh.features`. Off: no PRs row in the sidebar,
   ⌘⇧G (`board-herdr.prs`) and the gear do nothing, GitHub isn't read for it, and turning it off while the view shows
@@ -439,6 +446,8 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   "board-herdr.close", "cmd-shift-a": "board-herdr.asks", "cmd-shift-b": "board-herdr.open-board", "cmd-shift-g":
   "board-herdr.prs"}` and under `global`
   `"cmd-shift-b": "layout.switch:board-herdr"`.
+  A key reaches only the copies on screen, so the top bar's copy (always shown) takes these; the sidebar's can be
+  closed (⌘B) and the board's is hidden behind an agent's whole screen.
 - `~/.config/herdr-app/board.json` is optional: `skills` (the skills New agent offers, each found in
   `~/.claude/skills/<name>/SKILL.md` or the repo's `.claude/skills/<name>/SKILL.md` on that machine), `stageSkills`
   (`{"todo": …, "in_progress": …}`: what a Linear card dropped there runs), `issueArg` (skills whose first argument is
@@ -541,4 +550,4 @@ done `#53cf91`); text is Geist (UI) and JetBrains Mono (numbers, labels, termina
   same number as `Meus PRs · N`), and ⌘⇧G again goes back to the board; the sidebar's PRs count equals Precisa da minha
   revisão + Comentários a resolver + Draft: revisar para liberar.
 - Removing a team repo in the gear (or in `prs.json`) takes its unrequested PRs out of `Precisa do meu time` within 2 min.
-- ⌘⇧B from another layout opens this one on the board; ⌘E on the board opens the side with the cursor in the agent (typing goes there), and again closes it and the arrows move the selection; from an agent's whole screen, the board.
+- ⌘⇧B from another layout opens this one on the board; with the side open (Space), ⌘E puts the cursor in its agent and again back on the board, the side staying; with it closed, ⌘E opens the selected card's agent on the whole screen and ⌘E there brings the board back.

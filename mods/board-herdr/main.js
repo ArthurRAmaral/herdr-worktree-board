@@ -27,9 +27,9 @@
 // only its ⏎ makes the worktree and the agent, and Esc changes nothing.
 // Keyboard, like Linear's: ↑↓/jk within a column, ←→/hl across columns, 0 the Linear column, 1-9 a stage, S the stage,
 // ⇧←→ the stage before or after, ⏎ opens the worktree's agent, Space peeks at it beside the board, N a new worktree,
-// ⇧N one more agent in this one, / searches, ? lists every key; ⌘E (keys.json, board-herdr.toggle) goes from an agent
-// to the board; on the board it shows the selected card's agent beside it with the keyboard in it, to type, and hides
-// it again (from that agent too).
+// ⇧N one more agent in this one, / searches, ? lists every key; ⌘E (keys.json, board-herdr.toggle) moves the keyboard
+// between the board and an agent without opening or closing anything (the side stays; closed, the selected card's agent
+// on the whole screen, and back).
 // Data: spaces() and agents(); terminals() for the sub-agents; git in each worktree's folder for its repo, branch,
 // commits ahead of the default branch, uncommitted files and +added −removed; gh for the branch's pull request and
 // checks, and for what you merged this week. Merge PR runs `gh pr merge`, Ship PR runs `git push -u origin HEAD && gh
@@ -63,6 +63,7 @@ import { planPage } from "./md-html.js";
 import { checks, parseClonePrs, mergePrs, timedOut, ghStall, stallProblem, parseRepoPrs, prsByCommits, eachLimit } from "./worktree-prs.js";
 import { mainAgent, addNew, moveKey, toFront, byOrder, seq } from "./nav-order.js";
 import { appOf, resumeArgv, pickOpencodeSession, shellLine, parseClaudeSession, parkedCount } from "./park-rules.js";
+import { placesOn, placeOf, repoPlace } from "./where-rules.js";
 import { normLabel, labelsOf, toggleLabel, allLabels, suggest, groupByLabel, dropGone } from "./labels-rules.js";
 import { readBoardConfig, firstMessage, moveInLinear, todoColumn, canDrop, issueFromBranch, startedState } from "./linear-rules.js";
 
@@ -542,12 +543,24 @@ done`;
 const launch = (a, task) => (!task ? { argv: a.run } : a.key === "opencode" ? { argv: [...a.run, "--prompt", task] } : { argv: a.run, task });
 
 // New agent: a new worktree of the shown repo, or (space) one more agent in that worktree
-const newAgent = (space) => openOverlay({ mod: MOD, props: { part: "new", space: space ?? null }, kind: "dialog", width: 540, height: 770 });
-// a Linear card's start: New agent's short summary (⏎ starts, E the full dialog, Esc nothing), on the machine, agent and
-// repo of the last start, else the shown space's (a start outside git remembered no repo: nothing to go on)
-function startIssue(issue, stage) {
+const newAgent = (space) => openOverlay({ mod: MOD, props: { part: "new", space: space ?? null }, kind: "dialog", width: 540, height: 900 });
+// every space as New agent's WHERE lists it (where-rules.js): its card's title and stage, its repo, its main checkout
+function whereList() {
+  const repos = shared(REPOS) ?? {};
+  return worktrees().map((w) => {
+    const r = repos[w.key], s = w.space, main = r?.common?.replace(/\/\.git$/, "");
+    return { id: w.key, machine: s.machine ?? null, name: w.name, stage: w.stage, status: w.status, common: r?.common ?? null,
+      repoName: r?.name ?? null, isMain: Boolean(main) && [place(s), s.folder].includes(main), at: w.at };
+  });
+}
+// a Linear card's start: New agent's short summary (⏎ starts, E the full dialog, Esc nothing), in board.json's
+// linearRepo on whichever machine has it open (the last start's machine first), else on the machine, agent and repo of
+// the last start, else the shown space's (a start outside git remembered no repo: nothing to go on)
+async function startIssue(issue, stage) {
   const last = shared(LAST), s = activeSpace();
-  const from = last?.repo?.main ? { machine: last.machine ?? null, dir: last.repo.main, agent: last.agent }
+  const fixed = repoPlace(whereList(), (await boardConfig()).linearRepo, last?.machine ?? null);
+  const from = fixed ? { ...fixed, agent: last?.agent }
+    : last?.repo?.main ? { machine: last.machine ?? null, dir: last.repo.main, agent: last.agent }
     : { machine: s?.machine ?? null, dir: null };
   return openOverlay({ mod: MOD, kind: "dialog", width: 420, height: 330,
     props: { part: "new", summary: true, fromLinear: true, issue, stage, ...from } });
@@ -557,7 +570,7 @@ function editIssue(p) {
   const { overlay, ...rest } = p;
   closeOverlay(overlay);
   // a bit taller than New agent: it may offer the shown space's repo under WHERE
-  return openOverlay({ mod: MOD, kind: "dialog", width: 540, height: 802, props: { ...rest, summary: false, wasSummary: true } });
+  return openOverlay({ mod: MOD, kind: "dialog", width: 540, height: 930, props: { ...rest, summary: false, wasSummary: true } });
 }
 
 // the stage picker: at the pointer for a click, centered for a key; for a Linear card (issue), only the stages it can
@@ -823,8 +836,9 @@ export default class Board extends View {
     }
     if (this.part !== "board") { // the bars only draw what the board shares, and the clock
       cx.timer.every(30000, (cx) => { this.now = Date.now(); cx.notify(); });
-      // board-herdr.open-board|open-<stage>|new-agent|go-<address>|toggle: what the sidebar's rows do, for keys.json
-      // (only this copy takes them, so New agent opens once)
+      // board-herdr.open-board|open-<stage>|new-agent|go-<address>|toggle: what the sidebar's rows do, for keys.json;
+      // taken by the top bar's copy, the one always shown (a key reaches only shown copies: with the sidebar closed
+      // and an agent on the whole screen, no other copy hears it), and only there, so New agent opens once
       // Asks: the sidebar is always shown, so its copy finds the questions, before the panel is ever opened
       if (this.part === "nav") {
         this.engine = new Engine();
@@ -846,6 +860,9 @@ export default class Board extends View {
         cx.timer.every(1000, (cx) => { if (prsFeature()) this.prsFeed.tick(cx); });
       }
       if (this.part === "nav") cx.spawn(async (cx) => {
+        for (;;) if (String(await nextCommand()).replace(/^board-herdr\./, "") === "asks-recheck") this.engine.recheck(); // its engine is here
+      });
+      if (this.part === "top") cx.spawn(async (cx) => {
         for (;;) {
           const c = String(await nextCommand()).replace(/^board-herdr\./, "");
           const k = c === "open-board" ? null : c.startsWith("open-") && STAGES.some(([s]) => s === c.slice(5)) ? c.slice(5) : undefined;
@@ -856,7 +873,6 @@ export default class Board extends View {
           else if (c === "prs") { if (shownView() === "prs") openBoard(null); else openPrs(); } // ⌘⇧G
           else if (c === "prs-settings") openPrsSettings(); // the PRs view's gear
           else if (c === "asks-open") { openBoard(null); toggleAsks(true); } // a question's toast
-          else if (c === "asks-recheck") this.engine.recheck(); // read every agent's last turn again
           else if (c.startsWith("go-")) goToAgent(c.slice(3)); // board-herdr.go-t7: what a click on an agent does
           // ⌘E from an agent: the board (which takes the keyboard); on the board, the board's copy shows or hides the side
           else if (c === "toggle" && shownView() !== "board") openBoard(shared(COL)?.kind ?? null);
@@ -1563,14 +1579,32 @@ export default class Board extends View {
     cx.notify();
   }
 
-  // ⌘E on the board: back out of Focus or the search, else the side as Space does (the selected worktree's agent
-  // beside the board) but with the keyboard in that agent, to type a prompt; again (from the agent too) it closes, the
-  // board taking the keyboard back
+  // ⌘E on the board moves only the keyboard, never the views: with the side open, between the board and the agent (or
+  // terminals) beside it; with the side closed, to the selected card's agent or terminals on the whole screen (no card:
+  // the agent last focused). From an agent's whole screen the sidebar's copy brings the board back
   toggle(cx) {
-    if (this.focus) { this.setFocus(cx, false); return; }
+    if (shownView() !== "board") return; // the top bar's copy brings the board back
     if (this.searching) { this.grab(cx); return; }
-    if (this.peek) { this.setPeek(cx, false); this.grab(cx); }
-    else this.setPeek(cx, true, true);
+    if (this.peek || this.focus) {
+      if (this.h.is_focused()) this.typeInSide(); else this.grab(cx);
+      return;
+    }
+    const t = this.cards.find((x) => x.key === this.sel && !x.issue), f = focused()?.terminal;
+    if (t) this.goTo(cx, t);
+    else if (f && agents().some((a) => a.address === f)) goToAgent(f);
+  }
+
+  // the keyboard to the side: its agent, or the focused terminal of the tab it shows
+  typeInSide() {
+    if (findNode(layout(), "focus-body")?.active !== "focus-tab") {
+      const a = shared(SHOWN) ?? focused()?.agent;
+      if (a) run("pane.focus", { terminal: a });
+      return;
+    }
+    const tab = activeSpace()?.tabs?.find((x) => x.active)?.id;
+    const mine = panes().filter((p) => p.tab === tab && p.terminal);
+    const p = mine.find((x) => x.focused) ?? mine[0];
+    if (p) run("pane.focus", { pane: p.pane });
   }
 
   command(c, cx) {
@@ -1678,7 +1712,7 @@ export default class Board extends View {
       ["N  C", "new agent, in a new worktree"], ["⇧N", "one more agent in this worktree"],
       ["M", "merge or ship the PR"], ["O", "open the PR in the browser"],
       ["/", "search"], ["V", "this repo / all"], ["P", "next project"],
-      ["Esc", "back out one step"], ["⌘E", "the agent beside the board, to type / hide it"], ["⌘]  ⌘[", "next / previous agent"],
+      ["Esc", "back out one step"], ["⌘E", "keyboard: board ↔ its agent (side or whole screen)"], ["⌘]  ⌘[", "next / previous agent"],
     ];
     return v_flex().id("keys").absolute().right(16).bottom(12).w(350).p(14).gap(5).rounded(10)
       .bg("#18181b").border(1).border_color(C.line2).shadow_lg()
@@ -2909,6 +2943,9 @@ export default class Board extends View {
     this.mode = p.space ? "here" : "worktree"; // "worktree": a new one; "here": one more agent in this.src
     this.fixed = Boolean(p.space); // + Agent on a worktree: its machine and space, no picking
     this.machine = this.src?.machine ?? null; // where the agent runs: null this computer, else a machine's name
+    // ⌘N (no worktree given, not a Linear card): the space and the choice of the last start, wherever you are now
+    const last = shared(LAST), was = !p.space && p.machine === undefined && last?.space && spaces().find((s) => s.id === last.space);
+    if (was) { this.src = was; this.machine = was.machine ?? null; this.mode = last.mode === "here" ? "here" : "worktree"; }
     // from a Linear card: the machine and repo folder it starts from (the shown space only counts on that machine)
     if (p.machine !== undefined) {
       this.machine = p.machine;
@@ -3110,6 +3147,28 @@ export default class Board extends View {
       this.reprobe(cx);
     } };
   }
+  // WHERE: a space (a repo's entry starts from its main checkout); outside git only "In this space"
+  pickPlace(cx, x) {
+    this.dir = null;
+    this.backTo = null;
+    this.src = spaces().find((s) => s.id === x.main) ?? null;
+    if (!x.git) this.mode = "here";
+    else if (this.mode === "here" && x.worktrees.length < 2) this.mode = "worktree";
+    this.error = "";
+    this.probe(cx);
+    cx.notify();
+  }
+
+  // Existing worktree: one more agent in it
+  pickWorktree(cx, id) {
+    this.dir = null;
+    this.src = spaces().find((s) => s.id === id) ?? this.src;
+    this.mode = "here";
+    this.probe(cx);
+    this.task.focus();
+    cx.notify();
+  }
+
   reprobe(cx) { this.mode = "worktree"; this.error = ""; this.probe(cx); this.branch.focus(); cx.notify(); }
   linearProject() { return this.refs.find((r) => r.kind === "project"); }
 
@@ -3213,7 +3272,8 @@ export default class Board extends View {
     const args = launch(a, task);
     const done = () => {
       if (!skill) setShared(PICK, a.key); // the agent you pick next time stays yours
-      setShared(LAST, { machine: this.machine, agent: a.key, repo: this.repo }); // where the Linear summary starts next
+      // where the Linear summary starts next, and ⌘N (the space and New / Existing)
+      setShared(LAST, { machine: this.machine, agent: a.key, repo: this.repo, space: this.src?.id ?? null, mode: this.mode });
       // a Linear card's start: its column hides it until Linear says it started (or its worktree shows), 2 minutes at most
       if (this.fromLinear && issue) {
         const now = Date.now();
@@ -3402,6 +3462,10 @@ export default class Board extends View {
       ? `${this.repo.name} · from ${this.repo.base ?? "HEAD"} · ~/.herdr/worktrees/${this.repo.name}/${slugPath(this.branchName())}`
       : "not in a git repo";
     const srcName = this.src ? (this.src.named ? this.src.name : this.src.branch || this.src.name) : "no space";
+    const places = placesOn(whereList(), this.machine);
+    const entry = this.src ? placeOf(places, this.src.id)
+      : places.find((x) => x.git && x.key.replace(/\/\.git$/, "") === this.dir) ?? null;
+    const git = this.fixed ? this.repo !== null : entry ? entry.git : Boolean(this.dir);
     const why = this.blocker();
     const ready = a && a.installed !== false && !this.busy && (fresh ? this.repo : this.src) && !needsText && !why;
     const issue = this.linearIssue(), project = this.linearProject(), other = this.otherRepo();
@@ -3424,11 +3488,37 @@ export default class Board extends View {
               .child(icon("machine", 11, on ? C.text : C.dim))
               .child(div().font_family(SANS).text_size(12).text_color(on ? C.text : C.muted).child(machineLabel(m)));
           }))))
+      // the machine's spaces: a repo once (its worktrees under Existing worktree), each space outside git
+      .when(!this.fixed, (el) => el.child(h_flex().id("new-places").w_full().pb(8).flex_wrap().gap(6)
+        .children(places.map((x, i) => {
+          const on = x === entry;
+          return h_flex().id(`new-p-${i}`).h(26).px(10).gap(6).items_center().rounded(7).border(1).cursor_pointer()
+            .border_color(on ? C.accent : C.line2).bg(on ? "#1c1926" : C.main).hover((st) => st.bg(on ? "#1c1926" : C.hover))
+            .on_click((_e, cx) => this.pickPlace(cx, x))
+            .child(mono(10, on ? C.accent : C.dim, x.git ? "⎇" : "▢"))
+            .child(div().font_family(SANS).text_size(12).text_color(on ? C.text : C.soft).child(trunc(String(x.name), 28)))
+            .when(x.git && x.worktrees.length > 1, (el) => el.child(mono(10, C.dim, String(x.worktrees.length))));
+        }))
+        .when(!places.length, (el) => el.child(mono(11, C.dim, `no space on ${machineLabel(this.machine)}`)))))
       .child(v_flex().w_full().gap(6)
-        .child(where("new-worktree", fresh, Boolean(this.repo), "New worktree", repoSub,
-          (cx) => { this.mode = "worktree"; this.branch.focus(); cx.notify(); }))
-        .child(where("new-here", !fresh, Boolean(this.src), "In this worktree", `${srcName} · ${tilde(this.src ? place(this.src) : "")}`,
+        .when(git, (el) => el.child(where("new-worktree", fresh, Boolean(this.repo), "New worktree", repoSub,
+          (cx) => { this.mode = "worktree"; this.branch.focus(); cx.notify(); })))
+        .child(where("new-here", !fresh, Boolean(this.src), git ? (this.fixed ? "In this worktree" : "Existing worktree") : "In this space",
+          `${srcName} · ${tilde(this.src ? place(this.src) : "")}`,
           (cx) => { this.mode = "here"; this.task.focus(); cx.notify(); }))
+        // Existing worktree: the repo's worktrees on this machine, the main checkout first
+        .when(!fresh && !this.fixed && git && (entry?.worktrees.length ?? 0) > 1, (el) => el.child(v_flex().id("new-wts").w_full().max_h(150)
+          .overflow_y_scrollbar().pl(28).gap(2)
+          .children(entry.worktrees.map((w) => {
+            const on = w.id === this.src?.id, st = STAGES.find(([k]) => k === w.stage);
+            return h_flex().id(`new-wt-${w.id}`).w_full().flex_none().h(26).px(8).gap(8).items_center().rounded(6).cursor_pointer()
+              .bg(on ? "#1c1926" : "#00000000").hover((s) => s.bg(on ? "#1c1926" : C.hover))
+              .on_click((_e, cx) => this.pickWorktree(cx, w.id))
+              .child(div().w(12).flex_none().child(mono(11, C.accent, on ? "✓" : "")))
+              .child(div().flex_1().min_w(0).truncate().font_family(SANS).text_size(12).text_color(on ? C.text : C.soft)
+                .child(w.isMain ? `${w.name} · main checkout` : w.name))
+              .child(mono(10, C.dim, st ? st[1] : ""));
+          }))))
         // from a Linear card: the shown space's repo instead of the last start's (and back)
         .when(!!other, (el) => el.child(h_flex().id("new-other").w_full().h(26).px(12).gap(8).items_center().rounded(7).cursor_pointer()
           .hover((st) => st.bg(C.hover)).on_click((_e, cx) => other.go(cx))
